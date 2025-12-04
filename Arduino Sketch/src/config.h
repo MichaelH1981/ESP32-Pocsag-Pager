@@ -5,7 +5,7 @@ In the near future, bring this to a menu, and load-edit them in SPIFFS
 
 //Default settings
 
-extern float offset = 0.0044;  // device specific, in MHz. VHF: 0.0014 UHF: 0.0044
+extern float offset = 0.0000;  // device specific, in MHz. VHF: 0.0014 UHF: 0.0044
 extern float frequency = 439.98750;
 
 #define RICNUMBER 8 //Maximum number of RIC usable
@@ -17,6 +17,9 @@ extern float frequency = 439.98750;
 #define ATONE 2730 //Frequencies in Hz of specific tones
 #define BTONE 1005
 #define CTONE 3201
+// Display Timeout in Sekunden
+// 0 = immer an, 5 = 5s, 15 = 15s, 30 = 30s
+#define DISPLAY_TIMEOUT_SECONDS 30
 
 struct ric{
     long ricvalue; //RIC adress itself
@@ -30,6 +33,7 @@ struct ric{
 {RIC,"NAME",ringtone(see below),TBD,TBD}
 */
 ric[RICNUMBER]={
+        {YOUR_RIC, "YOUR_CALL",2,0,0},
         {65009, "IND",2,0,0},
         {1040, "EMERGENCY",0,0,0},
         {1080, "APRSWX",1,0,0},
