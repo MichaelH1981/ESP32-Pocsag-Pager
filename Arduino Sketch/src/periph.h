@@ -15,3 +15,6 @@
 
 #define BUZZER 14
 #define LED 25 // Internal green LED
+#define BTN_UP     12
+#define BTN_ENTER  13
+#define BTN_DOWN   15
