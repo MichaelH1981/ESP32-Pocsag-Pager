@@ -69,6 +69,8 @@ The goal is to transform the simple demo pager into a fully usable handheld devi
 The original POCSAG functionality (RadioLib, `pager.begin()`, decoding, RIC filtering) remains intact and compatible.  
 All added features integrate seamlessly with the original concept while significantly expanding functionality and user experience.
 
+### ToDo
+
 
 ## ESP32 DAPNET Pager – Extended Version Deutsch
 
