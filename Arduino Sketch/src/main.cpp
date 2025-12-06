@@ -38,7 +38,23 @@ const char* INBOX_FILE_PATH = "/inbox.log";
 // -----------------------------------------------------------------------------
 // Firmware version
 // -----------------------------------------------------------------------------
-const char* FW_VERSION = "v0.1d";
+const char* FW_VERSION = "v0.2a";
+
+// -----------------------------------------------------------------------------
+// Battery measurement (VBAT on GPIO35)
+// -----------------------------------------------------------------------------
+#if defined(ESP32)
+const int   PIN_BATTERY_ADC   = 35;    // ADC pin for battery voltage
+const float ADC_REF_VOLTAGE   = 3.3f;  // approximate ADC reference voltage
+const int   ADC_MAX_VALUE     = 4095;  // 12-bit ADC
+
+// Voltage divider ratio: VBAT / Vadc
+// Example: 100k / 100k -> factor 2.0 (4.2V -> ~2.1V at ADC).
+// Adjust if your board uses a different divider.
+const float BAT_VDIV_RATIO    = 2.0f;
+
+float batteryVoltage = 0.0f;          // last measured battery voltage
+#endif
 
 // -----------------------------------------------------------------------------
 // Radio & pager instances
@@ -67,6 +83,12 @@ int          displayTimeoutSeconds     = DISPLAY_TIMEOUT_SECONDS;
 int inboxCurrent = 0;  // currently selected/visible inbox message
 int inboxTotal   = 0;  // total number of messages in inbox (logical count)
 
+// Inbox menu state
+bool inboxMenuActive = false;
+int  inboxMenuIndex  = 0;
+const char* INBOX_MENU_ITEMS[] = { "Del Msg", "Del All", "Cancel" };
+const int   INBOX_MENU_ITEM_COUNT = 3;
+
 // Persistent storage status
 bool storageOk = false;
 
@@ -90,6 +112,39 @@ unsigned long lastTimeUpdateMillis = 0;
 // Example for Europe/Berlin: winter = 60, summer = 120
 int timeOffsetMinutes = 60;
 
+// -----------------------------------------------------------------------------
+// Reading VBat
+// -----------------------------------------------------------------------------
+
+#if defined(ESP32)
+float readBatteryVoltage() {
+  // We take multiple samples and average them to reduce noise
+  const int samples = 8;
+  uint32_t sum      = 0;
+
+  for (int i = 0; i < samples; ++i) {
+    sum += analogRead(PIN_BATTERY_ADC);
+    delay(2); // small pause between samples
+  }
+
+
+  float avg = (float)sum / (float)samples;
+
+  // Convert ADC value to voltage at the pin
+  float vAdc = (avg / (float)ADC_MAX_VALUE) * ADC_REF_VOLTAGE;
+
+  // Convert to real battery voltage using the divider ratio
+  float vBat = vAdc * BAT_VDIV_RATIO;
+
+  return vBat;
+}
+#endif
+#if defined(ESP32)
+void updateBatteryMeasurement() {
+  // Update global batteryVoltage with a fresh reading
+  batteryVoltage = readBatteryVoltage();
+}
+#endif
 // -----------------------------------------------------------------------------
 // Inbox structures
 // -----------------------------------------------------------------------------
@@ -157,6 +212,12 @@ void restorePushMessage(const PageMessage& msg);
 void storageInit();
 void displaySetOn(bool on);
 void markDisplayActivity();
+void displayInboxMenu();
+void deleteCurrentMessage();
+void deleteAllMessages();
+void onMenuUpPressed();
+void onMenuDownPressed();
+void onMenuEnterPressed();
 
 // -----------------------------------------------------------------------------
 // Display helpers
@@ -176,6 +237,10 @@ void displaySetOn(bool on) {
   displayIsOn = on;
 
   if (displayIsOn) {
+    // When the display is turned on, we update the battery reading
+#if defined(ESP32)
+    updateBatteryMeasurement();
+#endif
     // Turn the OLED panel back on, keep buffer content
     display.ssd1306_command(SSD1306_DISPLAYON);
     display.display();
@@ -184,6 +249,7 @@ void displaySetOn(bool on) {
     display.ssd1306_command(SSD1306_DISPLAYOFF);
   }
 }
+
 
 // Mark user activity or display usage to reset the power-save timer
 void markDisplayActivity() {
@@ -610,6 +676,78 @@ void dumpInboxToSerial() {
   Serial.println(F("========================"));
 }
 
+void deleteCurrentMessage() {
+  if (inboxCount == 0) {
+    return;
+  }
+
+  if (inboxCurrent < 0 || inboxCurrent >= INBOX_SIZE || !inbox[inboxCurrent].valid) {
+    return;
+  }
+
+  int oldIdx = inboxCurrent;
+
+  // Aktuelle Nachricht ungültig machen
+  inbox[oldIdx].valid = false;
+
+  // Inbox neu zählen und neue aktuelle Position wählen
+  int newCount = 0;
+  int newCurrent = -1;
+  int bestDist = INBOX_SIZE + 1;
+
+  for (int i = 0; i < INBOX_SIZE; ++i) {
+    if (!inbox[i].valid) {
+      continue;
+    }
+    newCount++;
+
+    // möglichst nahe an der alten Position bleiben
+    int dist = abs(i - oldIdx);
+    if (dist < bestDist) {
+      bestDist = dist;
+      newCurrent = i;
+    }
+  }
+
+  inboxCount = newCount;
+  inboxTotal = inboxCount;
+
+  if (inboxCount == 0) {
+    inboxCurrent = 0;
+  } else if (newCurrent >= 0) {
+    inboxCurrent = newCurrent;
+  }
+
+  // Änderungen in LittleFS speichern
+  saveInboxToFS();
+
+  Serial.print(F("[Inbox] Deleted message at index "));
+  Serial.print(oldIdx);
+  Serial.print(F(", remaining="));
+  Serial.println(inboxCount);
+}
+void deleteAllMessages() {
+  Serial.println(F("[Inbox] Deleting all messages"));
+
+  // RAM-Inbox zurücksetzen
+  resetInboxMemory();
+
+  // Reminder zurücksetzen
+  newMessagePending    = false;
+  reminderPulseActive  = false;
+  digitalWrite(LED, LOW);
+
+  // Datei im Flash löschen
+  if (storageOk && LittleFS.exists(INBOX_FILE_PATH)) {
+    LittleFS.remove(INBOX_FILE_PATH);
+    Serial.println(F("[FS] Inbox file removed"));
+  } else {
+    // alternativ könnten wir eine leere Inbox speichern:
+    // saveInboxToFS();
+    Serial.println(F("[FS] No inbox file to remove"));
+  }
+}
+
 // -----------------------------------------------------------------------------
 // Time message parsing (DAPNET time RICs)
 // -----------------------------------------------------------------------------
@@ -820,12 +958,29 @@ void pocsagStartRx() {
 // -----------------------------------------------------------------------------
 // Display init & startup screen
 // -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Display init
+// -----------------------------------------------------------------------------
+void displayInit() {
+  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    while (true) {
+      // Halt
+    }
+  }
 
-// Startup screen: simple DAPNET logo (left) + "DAPNET" text + version below
+  display.clearDisplay();
+  display.display();
+
+  displayIsOn             = true;
+  displayLastActiveMillis = millis();
+}
+
+/// Startup screen: simple DAPNET logo (left) + "DAPNET" text + version + battery
 void drawStartupScreen() {
   display.clearDisplay();
 
-  // Simple icon on the left, moved a bit to the left
+  // Simple icon on the left
   display.drawCircle(14, 38, 12, WHITE);
   display.drawCircle(20, 18, 6, WHITE);
   display.drawCircle(38, 26, 8, WHITE);
@@ -837,7 +992,6 @@ void drawStartupScreen() {
   // "DAPNET" text on the right
   display.setTextSize(2);
   display.setTextColor(WHITE);
-
   display.setCursor(52, 20);
   display.print("DAPNET");
 
@@ -846,24 +1000,18 @@ void drawStartupScreen() {
   display.setCursor(52, 38);
   display.print(FW_VERSION);
 
+  // Battery voltage at the bottom
+#if defined(ESP32)
+  display.setCursor(0, 54);  // bottom line of 64px display
+  display.print(F("Bat: "));
+  display.print(batteryVoltage, 2);
+  display.print(F("V"));
+#endif
+
   display.display();
 }
 
-void displayInit() {
-  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-    Serial.println(F("SSD1306 allocation failed"));
-    while (true) {
-      // Halt
-    }
-  }
 
-  display.clearDisplay();
-  drawStartupScreen();
-  display.display();
-
-  displayIsOn             = true;
-  displayLastActiveMillis = millis();
-}
 
 // -----------------------------------------------------------------------------
 // Button handling
@@ -904,10 +1052,19 @@ void processButton(ButtonState &btn, void (*onPress)()) {
 }
 
 void handleButtons() {
-  processButton(btnUp,    onUpPressed);
-  processButton(btnEnter, onEnterPressed);
-  processButton(btnDown,  onDownPressed);
+  if (inboxMenuActive) {
+    // Menü aktiv: Up/Down navigieren, Enter bestätigt
+    processButton(btnUp,    onMenuUpPressed);
+    processButton(btnEnter, onMenuEnterPressed);
+    processButton(btnDown,  onMenuDownPressed);
+  } else {
+    // Normalmodus: Nachrichten blättern / Inbox anzeigen
+    processButton(btnUp,    onUpPressed);
+    processButton(btnEnter, onEnterPressed);
+    processButton(btnDown,  onDownPressed);
+  }
 }
+
 
 // -----------------------------------------------------------------------------
 // Screen drawing helpers
@@ -966,21 +1123,25 @@ void displayPage(const String &address, const String &text) {
 
 // Inbox view
 void displayInbox() {
+  // Any display activity resets the power-save timer
   markDisplayActivity();
 
   if (!displayIsOn) {
-    return;
+    return;   // If display is off, do nothing (buttons will wake it)
   }
 
   display.clearDisplay();
-  drawClockBar();
-  clearContentArea();
+  drawClockBar();       // Draw top bar: date/time left, message index right
+  clearContentArea();   // Clear area below the status bar
 
   display.setTextColor(WHITE);
   display.setTextSize(1);
 
   int y = STATUS_BAR_HEIGHT + 2;
 
+  // ─────────────────────────────────────────────
+  // If no messages are stored, show a simple text
+  // ─────────────────────────────────────────────
   if (inboxCount == 0) {
     display.setCursor(0, y);
     display.print(F("Inbox empty"));
@@ -988,7 +1149,9 @@ void displayInbox() {
     return;
   }
 
-  // Make sure inboxCurrent points to a valid message
+  // ─────────────────────────────────────────────
+  // Ensure inboxCurrent points to a valid entry
+  // ─────────────────────────────────────────────
   if (inboxCurrent < 0 || inboxCurrent >= INBOX_SIZE || !inbox[inboxCurrent].valid) {
     for (int i = INBOX_SIZE - 1; i >= 0; --i) {
       if (inbox[i].valid) {
@@ -1000,15 +1163,35 @@ void displayInbox() {
 
   PageMessage &msg = inbox[inboxCurrent];
 
-  // Small header: index + RIC name
+  // ─────────────────────────────────────────────
+  // FIRST LINE under the status bar:
+  // Left  : Sender (RIC name)
+  // Right : Battery voltage, right-aligned (e.g. "4.05V")
+  // ─────────────────────────────────────────────
+
+#if defined(ESP32)
+  // Prepare battery voltage string
+  char batBuf[12];
+  snprintf(batBuf, sizeof(batBuf), "%.2fV", batteryVoltage);
+
+  // Measure text width so we can right-align it
+  int16_t bx, by;
+  uint16_t bw, bh;
+  display.getTextBounds(batBuf, 0, 0, &bx, &by, &bw, &bh);
+
+  // Right-aligned battery voltage
+  display.setCursor(SCREEN_W - bw, y);
+  display.print(batBuf);
+#endif
+
+  // Sender/ric name on the left side of the same line
   display.setCursor(0, y);
-  display.print(F("#"));
-  display.print(inboxCurrent);
-  display.print(F(" "));
   display.print(msg.ricName);
   y += 10;
 
-  // Time, if present
+  // ─────────────────────────────────────────────
+  // SECOND LINE: Timestamp (if valid)
+  // ─────────────────────────────────────────────
   if (msg.time.valid) {
     char tbuf[20];
     snprintf(tbuf, sizeof(tbuf), "%02d.%02d.%02d %02d:%02d",
@@ -1017,16 +1200,20 @@ void displayInbox() {
              msg.time.year % 100,
              msg.time.hour,
              msg.time.minute);
+
     display.setCursor(0, y);
     display.print(tbuf);
     y += 10;
   }
 
-  // Message text (same wrapping as in drawMessageScreen)
+  // ─────────────────────────────────────────────
+  // MESSAGE BODY: 21 characters per line wrapping
+  // ─────────────────────────────────────────────
   const int maxCharsPerLine = 21;
   int       len             = msg.text.length();
   int       pos             = 0;
 
+  // Draw the text line by line until we run out of screen space
   while (pos < len && y <= SCREEN_H - 8) {
     int    remaining = len - pos;
     int    lineLen   = (remaining > maxCharsPerLine) ? maxCharsPerLine : remaining;
@@ -1035,7 +1222,7 @@ void displayInbox() {
     display.setCursor(0, y);
     display.print(line);
 
-    y += 8;
+    y += 8;     // 8px line height for text size 1
     pos += lineLen;
   }
 
@@ -1061,6 +1248,40 @@ void inboxShowNext() {
 
   // If nothing else was found, keep the current one
   displayInbox();
+}
+void displayInboxMenu() {
+  markDisplayActivity();
+
+  if (!displayIsOn) {
+    return;
+  }
+
+  display.clearDisplay();
+  drawClockBar();
+  clearContentArea();
+
+  display.setTextColor(WHITE);
+  display.setTextSize(1);
+
+  int y = STATUS_BAR_HEIGHT + 4;
+
+  display.setCursor(0, y);
+  display.print(F("Inbox Menu"));
+  y += 10;
+
+  for (int i = 0; i < INBOX_MENU_ITEM_COUNT; ++i) {
+    display.setCursor(0, y);
+    if (i == inboxMenuIndex) {
+      display.print('>');   // Markierung für die aktuelle Auswahl
+    } else {
+      display.print(' ');
+    }
+    display.print(' ');
+    display.print(INBOX_MENU_ITEMS[i]);
+    y += 10;
+  }
+
+  display.display();
 }
 
 // Show older message in the ring buffer
@@ -1187,13 +1408,81 @@ void onDownPressed() {
   markDisplayActivity();
   inboxShowNext();
 }
+void onMenuUpPressed() {
+  newMessagePending = false;
+  markDisplayActivity();
+
+  if (!inboxMenuActive) return;
+
+  inboxMenuIndex--;
+  if (inboxMenuIndex < 0) {
+    inboxMenuIndex = INBOX_MENU_ITEM_COUNT - 1;
+  }
+  displayInboxMenu();
+}
+
+void onMenuDownPressed() {
+  newMessagePending = false;
+  markDisplayActivity();
+
+  if (!inboxMenuActive) return;
+
+  inboxMenuIndex++;
+  if (inboxMenuIndex >= INBOX_MENU_ITEM_COUNT) {
+    inboxMenuIndex = 0;
+  }
+  displayInboxMenu();
+}
+
+void onMenuEnterPressed() {
+  newMessagePending = false;
+  markDisplayActivity();
+
+  if (!inboxMenuActive) return;
+
+  switch (inboxMenuIndex) {
+    case 0: // Del Msg
+      deleteCurrentMessage();
+      inboxMenuActive = false;
+      displayInbox();
+      break;
+
+    case 1: // Del All
+      deleteAllMessages();
+      inboxMenuActive = false;
+      displayInbox();
+      break;
+
+    case 2: // Cancel
+    default:
+      inboxMenuActive = false;
+      displayInbox();
+      break;
+  }
+}
 
 void onEnterPressed() {
+  // Jede Taste quittiert das Reminder-Blinken
   newMessagePending = false;
-
-  // ENTER always shows the inbox (from any screen)
   markDisplayActivity();
-  displayInbox();
+
+  // Wenn Display aus war, erst aufwecken und nur die Inbox zeigen
+  if (!displayIsOn) {
+    displaySetOn(true);
+    displayInbox();
+    return;
+  }
+
+  // Wenn keine Nachrichten vorhanden sind, macht ein Lösch-Menü keinen Sinn
+  if (inboxCount == 0) {
+    displayInbox();
+    return;
+  }
+
+  // Inbox-Menü öffnen
+  inboxMenuActive = true;
+  inboxMenuIndex  = 0;
+  displayInboxMenu();
 }
 
 // -----------------------------------------------------------------------------
@@ -1206,7 +1495,7 @@ void setup() {
   digitalWrite(LED, LOW);
 
 #if defined(ESP32)
-  // Reduce CPU frequency to save power (80 MHz is plenty for this use case)
+  // Reduce CPU frequency to save power (80 MHz is fine for this use case)
   setCpuFrequencyMhz(80);
 
   // Disable WiFi and Bluetooth to save power
@@ -1217,6 +1506,23 @@ void setup() {
 #endif
 
   displayInit();
+
+#if defined(ESP32)
+  // Configure ADC for battery measurement
+  analogReadResolution(12);                           // 0..4095
+  analogSetPinAttenuation(PIN_BATTERY_ADC, ADC_11db); // up to ~3.6V at pin
+
+  // Give the regulator and battery a short moment to settle after boot
+  delay(500);
+
+  // First battery measurement for the splash screen
+  batteryVoltage = readBatteryVoltage();
+#endif
+
+  // Show startup screen with battery voltage
+  drawStartupScreen();
+  delay(1500);   // keep splash screen for 1.5s
+
   buttonsInit();
   storageInit();   // Initialize LittleFS and restore inbox
   pocsagInit();
