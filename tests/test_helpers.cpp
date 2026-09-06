@@ -29,7 +29,17 @@ int main() {
   assert(!decodeSkyper(4512, badLabel, strlen(badLabel)).valid);
   char padded[] = "F#Ifmmp\x03\x04";
   assert(decodeSkyper(4520, padded, strlen(padded)).valid);
-  assert(strcmp(padded + 2, "Hello\x03\x04") == 0);
+  assert(strcmp(padded + 2, "Hello  ") == 0);
+  char special[] = ";!WFSPO;!Qspqbhbujfojfvxt!\x14!xffl!48!3137";
+  h = decodeSkyper(4520, special, strlen(special));
+  assert(h.valid && h.rubric == 28 && h.item == 1);
+  assert(strcmp(special + 2, "VERON: Propagatienieuws   week 37 2026") == 0);
+  assert(strcmp(pagerGermanGlyph('{', true), "ä") == 0);
+  assert(strcmp(pagerGermanGlyph('\\', false), "Oe") == 0);
+  assert(strcmp(pagerGermanGlyph('~', false), "ss") == 0);
+  assert(pagerGermanGlyph('A', true) == nullptr);
+  char invalid[] = "F!bad\x80";
+  assert(!decodeSkyper(4520, invalid, strlen(invalid)).valid);
   ButtonDebounce b;
   assert(!b.update(false, 100));
   assert(!b.update(true, 105));

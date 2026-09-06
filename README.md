@@ -1,4 +1,4 @@
-# ESP32 DAPNET Pager — v0.4.0
+# ESP32 DAPNET Pager — v0.4.1
 
 POCSAG pager for the LILYGO T3 V1.6.1, based on
 [ManoDaSilva's ESP32-Pocsag-Pager](https://github.com/ManoDaSilva/ESP32-Pocsag-Pager).
@@ -50,20 +50,46 @@ formatting the existing message store. A blank filesystem needs explicit setup.
 
 ## Operation
 
-- Home: date/time, battery voltage in V, message count.
+- Home: date/time, battery voltage in V, three folders with message counts.
+- UP/DOWN on home: select Nachrichten, Wetter/Pegel or Warnmeldungen.
 - Short ENTER: open inbox; from the inbox, open the action menu.
 - Hold ENTER for 800 ms: return to home from any screen.
 - UP/DOWN: browse messages or choose a menu item.
-- Action menu: home, delete message, delete all, back.
+- Action menu: home, delete message, delete all **in the selected folder**, back.
 - Deletion requires confirmation, with **No** selected by default.
 - A short key press while the screen is off wakes it without executing a hidden action.
 
 ## Reception and time
 
 Skyper news on RIC 4520 and rubric labels on 4512 are decoded without shifting
-their protocol headers. Ordinary messages stay unchanged. Skyper news are
-printed in readable form in the serial monitor; enable `SKYPER_NEWS_INBOX` to
-store and alert on all of them.
+their protocol headers. Ordinary messages stay unchanged. Serial `[Pager] Raw`
+lines intentionally show wire data; `[Skyper]` lines show decoded UTF-8 German
+text. OLED/storage use Ae/Oe/Ue/ae/oe/ue/ss because the default font is not UTF-8.
+Unexpected seven-bit controls in Skyper payloads become spaces; invalid headers
+and non-seven-bit bytes are rejected. Unsupported symbols cannot be recovered
+unambiguously from the sender's seven-bit encoding.
+
+| Folder | Default routing | Capacity | Behavior |
+| --- | --- | --- | --- |
+| Nachrichten | Personal RIC and other configured calls | 64 | Existing notification tone |
+| Wetter/Pegel | Skyper rubrics 61, 63, 80; RIC 1080 | 32 | Silent, no automatic screen switch |
+| Warnmeldungen | Skyper rubric 39; RIC 1040 | 16 | Screen + LED reminder; optional separate tone |
+
+Weather entries on 4520 replace the previous value for the same rubric/item.
+Repeated identical warnings on the same RIC are suppressed even across item
+numbers. Unselected Skyper rubrics remain terminal-only. `SKYPER_NEWS_INBOX=1`
+additionally routes them to Nachrichten with normal notification.
+
+Configure `WEATHER_SKYPER_RUBRICS`, `WARNING_SKYPER_RUBRICS`, `WARNING_RIC`,
+`WARNING_AUDIBLE` and `WARNING_RINGTONE` in `config_local.h`. Defaults reflect the
+observed local feed, not a universal emergency classification. Audible warning
+alarms default off until the feed is verified. Set `WARNING_RIC=0` to disable
+that address. Rubric lists may use 0 to select no rubric.
+
+Each folder has independent storage and eviction. Existing `/inbox.log` remains
+in Nachrichten; new folders use `/weather.log` and `/warnings.log`. Old records
+are not reclassified. Weather writes are batched at 30-second intervals (pending
+updates can be lost on power failure); other folders save immediately.
 
 Both DAPNET time formats are supported:
 
@@ -95,7 +121,7 @@ Version 0.4 was built and tested on a T3 V1.6.1: boot, battery display around
 4.18 V, button navigation, reception on GPIO33 and RIC208 synchronization were
 confirmed. Host tests cover the actual RadioLib receive function, buffer limits,
 UI transitions, battery filtering, Skyper decoding and time/calendar conversion.
-See [release notes](RELEASE-v0.4.0.md) and [test instructions](tests/README.md).
+See [release notes](RELEASE-v0.4.1.md) and [test instructions](tests/README.md).
 
 The reproduced heap overflow is fixed by checking every received character
 against a fixed 512-byte payload capacity; oversized messages are discarded.

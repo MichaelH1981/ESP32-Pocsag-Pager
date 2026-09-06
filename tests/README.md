@@ -3,7 +3,7 @@
 From the repository root, with a C++ compiler supporting sanitizers:
 
 ```sh
-for name in test_helpers test_pager_time test_ui_battery; do
+for name in test_helpers test_pager_time test_ui_battery test_mailbox; do
   c++ -std=c++11 -Wall -Wextra -Werror -fsanitize=address,undefined "tests/$name.cpp" -o "/tmp/$name" && "/tmp/$name" || exit 1
 done
 ```

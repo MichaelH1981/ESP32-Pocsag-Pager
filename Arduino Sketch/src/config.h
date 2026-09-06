@@ -33,6 +33,22 @@ In the near future, bring this to a menu, and load-edit them in SPIFFS
 #ifndef SKYPER_DECODE
 #define SKYPER_DECODE 1
 #endif
+// Folder routes inferred from the received local feed; override in config_local.h.
+#ifndef WEATHER_SKYPER_RUBRICS
+#define WEATHER_SKYPER_RUBRICS 61, 63, 80
+#endif
+#ifndef WARNING_SKYPER_RUBRICS
+#define WARNING_SKYPER_RUBRICS 39
+#endif
+#ifndef WARNING_RIC
+#define WARNING_RIC 1040
+#endif
+#ifndef WARNING_AUDIBLE
+#define WARNING_AUDIBLE 0 // Enable only after verifying the configured warning feed.
+#endif
+#ifndef WARNING_RINGTONE
+#define WARNING_RINGTONE 0
+#endif
 // Standard UTC offset; EU DST adds 60 minutes in summer (Germany defaults).
 // Already-local RIC 208/224 never receive another offset.
 #ifndef TIME_UTC_OFFSET_MINUTES

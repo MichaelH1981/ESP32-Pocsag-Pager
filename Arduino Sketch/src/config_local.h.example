@@ -19,3 +19,10 @@
 // Already-local RIC 208/224 are never shifted again.
 // #define TIME_UTC_OFFSET_MINUTES 60
 // #define TIME_EU_DST 1
+
+// Separate folders (observed local rubrics; adjust for your feed):
+// #define WEATHER_SKYPER_RUBRICS 61, 63, 80
+// #define WARNING_SKYPER_RUBRICS 39
+// #define WARNING_RIC 1040
+// #define WARNING_AUDIBLE 0
+// #define WARNING_RINGTONE 0

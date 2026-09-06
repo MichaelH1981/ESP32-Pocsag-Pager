@@ -16,6 +16,7 @@ Frequency offset must be configured for reliable decoding. At present time, ther
 #include "button_debounce.h"
 #include "pager_time.h"
 #include "pager_ui.h"
+#include "pager_mailbox.h"
 #include "battery_filter.h"
 #include <esp_system.h>
 #include <RadioLib.h>
@@ -51,12 +52,12 @@ static_assert(BATTERY_ADC_PIN < 0 ||
 #endif
 
 // Path for the persistent inbox file in LittleFS
-const char* INBOX_FILE_PATH = "/inbox.log";
+
 
 // -----------------------------------------------------------------------------
 // Firmware version
 // -----------------------------------------------------------------------------
-const char* FW_VERSION = "v0.4.0";
+const char* FW_VERSION = "v0.4.1";
 
 // -----------------------------------------------------------------------------
 // Optional battery measurement on a verified free ADC1 pin
@@ -105,8 +106,7 @@ unsigned long displayLastActiveMillis  = 0;
 int          displayTimeoutSeconds     = DISPLAY_TIMEOUT_SECONDS;
 
 // Inbox state (0-based)
-int inboxCurrent = 0;  // currently selected/visible inbox message
-int inboxTotal   = 0;  // total number of messages in inbox (logical count)
+
 
 PagerUi ui;
 const char* INBOX_MENU_ITEMS[] = { "Hauptmenue", "Nachr. loeschen", "Alle loeschen", "Zurueck" };
@@ -134,7 +134,7 @@ void drawCurrentScreen();
 // -----------------------------------------------------------------------------
 // Inbox structures
 // -----------------------------------------------------------------------------
-const int INBOX_SIZE = 64;
+
 
 struct PageMessage {
   uint32_t  addr;
@@ -144,9 +144,21 @@ struct PageMessage {
   bool      valid;
 };
 
-PageMessage inbox[INBOX_SIZE];
-int         inboxCount      = 0;  // number of valid entries
-int         inboxWriteIndex = 0;  // next write position (ring buffer)
+PageMessage personalMessages[64], weatherMessages[32], warningMessages[16];
+PagerMailbox<PageMessage> mailboxes[] = {
+  {personalMessages, 64}, {weatherMessages, 32}, {warningMessages, 16}
+};
+int activeInbox = PersonalInbox;
+PagerMailbox<PageMessage>& currentInbox() { return mailboxes[activeInbox]; }
+const char* inboxPath() {
+  static const char* paths[] = {"/inbox.log", "/weather.log", "/warnings.log"};
+  return paths[activeInbox];
+}
+const char* folderName(int folder) {
+  static const char* names[] = {"Nachrichten", "Wetter/Pegel", "Warnmeldungen"};
+  return names[folder];
+}
+unsigned long lastWeatherSave = 0;
 
 // -----------------------------------------------------------------------------
 // New message reminder state
@@ -272,29 +284,13 @@ void handleDisplayPowerSave() {
 
 // Reset all inbox entries in RAM
 void resetInboxMemory() {
-  inboxCount      = 0;
-  inboxWriteIndex = 0;
-  inboxTotal      = 0;
-  inboxCurrent    = 0;
-
-  for (int i = 0; i < INBOX_SIZE; ++i) {
-    inbox[i].valid = false;
-  }
+  currentInbox().clear();
 }
 
 // Push a message into the ring buffer without modifying the current time
 // Used when restoring messages from LittleFS
 void restorePushMessage(const PageMessage& msg) {
-  PageMessage& dst = inbox[inboxWriteIndex];
-  dst             = msg;
-  dst.valid       = true;
-
-  inboxWriteIndex = (inboxWriteIndex + 1) % INBOX_SIZE;
-  if (inboxCount < INBOX_SIZE) {
-    inboxCount++;
-  }
-
-  inboxTotal = inboxCount;
+  currentInbox().push(msg);
 }
 
 // Save all valid inbox messages to LittleFS in logical chronological order
@@ -303,15 +299,16 @@ void saveInboxToFS() {
     return;
   }
 
-  File f = LittleFS.open(INBOX_FILE_PATH, FILE_WRITE);
+  File f = LittleFS.open(inboxPath(), FILE_WRITE);
   if (!f) {
     Serial.println(F("[FS] Failed to open inbox file for writing"));
     return;
   }
 
-  if (inboxCount == 0) {
+  if (currentInbox().count == 0) {
     // Empty inbox → create an empty file
     f.close();
+    currentInbox().dirty = false;
     Serial.println(F("[FS] Saved empty inbox"));
     return;
   }
@@ -319,9 +316,9 @@ void saveInboxToFS() {
   // Find the oldest valid message in the ring buffer
   int oldestIndex = -1;
 
-  for (int i = 0; i < INBOX_SIZE; ++i) {
-    int idx = (inboxWriteIndex + i) % INBOX_SIZE;
-    if (inbox[idx].valid) {
+  for (int i = 0; i < currentInbox().capacity; ++i) {
+    int idx = (currentInbox().writeIndex + i) % currentInbox().capacity;
+    if (currentInbox().messages[idx].valid) {
       oldestIndex = idx;
       break;
     }
@@ -338,8 +335,8 @@ void saveInboxToFS() {
   int idx   = oldestIndex;
   int count = 0;
 
-  while (count < inboxCount) {
-    PageMessage& msg = inbox[idx];
+  while (count < currentInbox().count) {
+    PageMessage& msg = currentInbox().messages[idx];
     if (msg.valid) {
       // Format: addr|ricName|YYYYMMDDHHMMSS|text\n
       f.print(msg.addr);
@@ -373,12 +370,13 @@ void saveInboxToFS() {
       count++;
     }
 
-    idx = (idx + 1) % INBOX_SIZE;
+    idx = (idx + 1) % currentInbox().capacity;
   }
 
   f.close();
+  currentInbox().dirty = false;
   Serial.print(F("[FS] Saved inbox messages to LittleFS, count="));
-  Serial.println(inboxCount);
+  Serial.println(currentInbox().count);
 }
 
 // Load inbox messages from LittleFS into RAM
@@ -387,13 +385,13 @@ void loadInboxFromFS() {
     return;
   }
 
-  if (!LittleFS.exists(INBOX_FILE_PATH)) {
+  if (!LittleFS.exists(inboxPath())) {
     Serial.println(F("[FS] No inbox file found, starting with empty inbox"));
     resetInboxMemory();
     return;
   }
 
-  File f = LittleFS.open(INBOX_FILE_PATH, FILE_READ);
+  File f = LittleFS.open(inboxPath(), FILE_READ);
   if (!f) {
     Serial.println(F("[FS] Failed to open inbox file for reading"));
     resetInboxMemory();
@@ -425,10 +423,10 @@ void loadInboxFromFS() {
     String sTime = line.substring(p2 + 1, p3);
     String sText = line.substring(p3 + 1);
 
-    PageMessage msg;
+    PageMessage msg{};
     msg.addr    = (uint32_t)sAddr.toInt();
     msg.ricName = sRic;
-    msg.text    = sText;
+    msg.text    = sText.substring(0, 1024);
     msg.valid   = true;
 
     if (sTime != "-" && sTime.length() >= 14) {
@@ -446,7 +444,7 @@ void loadInboxFromFS() {
     restorePushMessage(msg);
 
     // We stop if we reach the maximum inbox size
-    if (inboxCount >= INBOX_SIZE) {
+    if (currentInbox().count >= currentInbox().capacity) {
       break;
     }
   }
@@ -454,14 +452,13 @@ void loadInboxFromFS() {
   f.close();
 
   // Set inboxCurrent to the newest message (last one we pushed)
-  inboxTotal = inboxCount;
-  if (inboxCount > 0) {
-    int newest = (inboxWriteIndex - 1 + INBOX_SIZE) % INBOX_SIZE;
-    inboxCurrent = newest;
+  if (currentInbox().count > 0) {
+    int newest = (currentInbox().writeIndex - 1 + currentInbox().capacity) % currentInbox().capacity;
+    currentInbox().current = newest;
   }
 
   Serial.print(F("[FS] Restored "));
-  Serial.print(inboxCount);
+  Serial.print(currentInbox().count);
   Serial.println(F(" messages from LittleFS"));
 }
 
@@ -478,113 +475,100 @@ void storageInit() {
   storageOk = true;
 
   // Preserve the existing inbox; a new filesystem must be provisioned explicitly.
-  loadInboxFromFS();
+  for (activeInbox = 0; activeInbox < 3; ++activeInbox) {
+    loadInboxFromFS();
+    currentInbox().dirty = false;
+  }
+  activeInbox = PersonalInbox;
 }
 
 
 // Store a message in the ring buffer inbox[] and persist it
 void storeMessage(uint32_t addr, const String &ricName, const String &text) {
-  PageMessage &msg = inbox[inboxWriteIndex];
-  msg.addr         = addr;
-  msg.ricName      = ricName;
-  msg.text         = text;
-  msg.valid        = true;
-
-  if (pagerTime.valid) {
-    msg.time = pagerTime;
+  PageMessage msg{};
+  msg.addr = addr;
+  msg.ricName = ricName;
+  msg.text = text;
+  msg.time = pagerTime;
+  msg.valid = true;
+  if (activeInbox == WeatherInbox && addr == 4520 && currentInbox().update(msg)) {
+    // Keep the selected message stable when a station updates.
   } else {
-    msg.time.year   = 0;
-    msg.time.month  = 0;
-    msg.time.day    = 0;
-    msg.time.hour   = 0;
-    msg.time.minute = 0;
-    msg.time.second = 0;
-    msg.time.valid  = false;
+    currentInbox().push(msg);
   }
+  if (activeInbox != WeatherInbox) saveInboxToFS();
+  Serial.printf("[Inbox] %s: %d/%d\n", folderName(activeInbox),
+                currentInbox().count, currentInbox().capacity);
+}
 
-  int storedIndex = inboxWriteIndex;
-
-  // Advance write index (ring buffer)
-  inboxWriteIndex = (inboxWriteIndex + 1) % INBOX_SIZE;
-
-  if (inboxCount < INBOX_SIZE) {
-    inboxCount++;
-  }
-
-  // Update inbox status
-  inboxTotal   = inboxCount;
-  inboxCurrent = storedIndex;  // newest message becomes the current one
-
-  Serial.print(F("[Inbox] Stored message #"));
-  Serial.print(storedIndex);
-  Serial.print(F(" (total="));
-  Serial.print(inboxCount);
-  Serial.println(F(")"));
-
-  // Persist the entire inbox to LittleFS
+// Weather writes are coalesced to reduce flash wear; newest data can be lost
+// on power failure during the last 30 seconds. Radio decoding always runs first.
+void flushWeatherInbox() {
+  if (!mailboxes[WeatherInbox].dirty || millis() - lastWeatherSave < 30000 ||
+      radio.available() >= 4) return;
+  const int previous = activeInbox;
+  activeInbox = WeatherInbox;
   saveInboxToFS();
-
-  // Set reminder flag: we have at least one new/unacknowledged message
-  newMessagePending        = true;
-  lastReminderBlinkMillis  = millis();
+  activeInbox = previous;
+  lastWeatherSave = millis();
 }
 
 // Debug helper: dump complete inbox to serial
 void dumpInboxToSerial() {
   Serial.println(F("====== INBOX DUMP ======"));
-  for (int i = 0; i < INBOX_SIZE; i++) {
-    if (!inbox[i].valid) {
+  for (int i = 0; i < currentInbox().capacity; i++) {
+    if (!currentInbox().messages[i].valid) {
       continue;
     }
     Serial.print('#');
     Serial.print(i);
     Serial.print(F(" RIC="));
-    Serial.print(inbox[i].addr);
+    Serial.print(currentInbox().messages[i].addr);
     Serial.print(F(" ("));
-    Serial.print(inbox[i].ricName);
+    Serial.print(currentInbox().messages[i].ricName);
     Serial.print(F(") "));
-    if (inbox[i].time.valid) {
+    if (currentInbox().messages[i].time.valid) {
       Serial.print('[');
-      Serial.print(inbox[i].time.day);
+      Serial.print(currentInbox().messages[i].time.day);
       Serial.print('.');
-      Serial.print(inbox[i].time.month);
+      Serial.print(currentInbox().messages[i].time.month);
       Serial.print('.');
-      Serial.print(inbox[i].time.year % 100);
+      Serial.print(currentInbox().messages[i].time.year % 100);
       Serial.print(' ');
-      Serial.print(inbox[i].time.hour);
+      Serial.print(currentInbox().messages[i].time.hour);
       Serial.print(':');
-      Serial.print(inbox[i].time.minute);
+      Serial.print(currentInbox().messages[i].time.minute);
       Serial.print(']');
     } else {
       Serial.print("[no time]");
     }
     Serial.print(F(" -> "));
-    Serial.println(inbox[i].text);
+    Serial.println(currentInbox().messages[i].text);
   }
   Serial.println(F("========================"));
 }
 
 void deleteCurrentMessage() {
-  if (inboxCount == 0) {
+  if (currentInbox().count == 0) {
     return;
   }
 
-  if (inboxCurrent < 0 || inboxCurrent >= INBOX_SIZE || !inbox[inboxCurrent].valid) {
+  if (currentInbox().current < 0 || currentInbox().current >= currentInbox().capacity || !currentInbox().messages[currentInbox().current].valid) {
     return;
   }
 
-  int oldIdx = inboxCurrent;
+  int oldIdx = currentInbox().current;
 
   // Aktuelle Nachricht ungültig machen
-  inbox[oldIdx].valid = false;
+  currentInbox().messages[oldIdx] = PageMessage{};
 
   // Inbox neu zählen und neue aktuelle Position wählen
   int newCount = 0;
   int newCurrent = -1;
-  int bestDist = INBOX_SIZE + 1;
+  int bestDist = currentInbox().capacity + 1;
 
-  for (int i = 0; i < INBOX_SIZE; ++i) {
-    if (!inbox[i].valid) {
+  for (int i = 0; i < currentInbox().capacity; ++i) {
+    if (!currentInbox().messages[i].valid) {
       continue;
     }
     newCount++;
@@ -597,13 +581,12 @@ void deleteCurrentMessage() {
     }
   }
 
-  inboxCount = newCount;
-  inboxTotal = inboxCount;
+  currentInbox().count = newCount;
 
-  if (inboxCount == 0) {
-    inboxCurrent = 0;
+  if (currentInbox().count == 0) {
+    currentInbox().current = 0;
   } else if (newCurrent >= 0) {
-    inboxCurrent = newCurrent;
+    currentInbox().current = newCurrent;
   }
 
   // Änderungen in LittleFS speichern
@@ -612,7 +595,7 @@ void deleteCurrentMessage() {
   Serial.print(F("[Inbox] Deleted message at index "));
   Serial.print(oldIdx);
   Serial.print(F(", remaining="));
-  Serial.println(inboxCount);
+  Serial.println(currentInbox().count);
 }
 void deleteAllMessages() {
   Serial.println(F("[Inbox] Deleting all messages"));
@@ -620,20 +603,8 @@ void deleteAllMessages() {
   // RAM-Inbox zurücksetzen
   resetInboxMemory();
 
-  // Reminder zurücksetzen
-  newMessagePending    = false;
-  reminderPulseActive  = false;
-  digitalWrite(LED, LOW);
+  saveInboxToFS();
 
-  // Datei im Flash löschen
-  if (storageOk && LittleFS.exists(INBOX_FILE_PATH)) {
-    LittleFS.remove(INBOX_FILE_PATH);
-    Serial.println(F("[FS] Inbox file removed"));
-  } else {
-    // alternativ könnten wir eine leere Inbox speichern:
-    // saveInboxToFS();
-    Serial.println(F("[FS] No inbox file to remove"));
-  }
 }
 
 // -----------------------------------------------------------------------------
@@ -725,23 +696,23 @@ void drawClockBar() {
   }
 
   // Right: inbox "x/n" (logical position among all valid messages)
-  if (inboxCount > 0) {
+  if (currentInbox().count > 0) {
     int logicalPos = 0;
     int seen       = 0;
 
-    for (int i = 0; i < INBOX_SIZE; ++i) {
-      if (!inbox[i].valid) {
+    for (int i = 0; i < currentInbox().capacity; ++i) {
+      if (!currentInbox().messages[i].valid) {
         continue;
       }
       ++seen;
-      if (i == inboxCurrent) {
+      if (i == currentInbox().current) {
         logicalPos = seen;
         break;
       }
     }
 
     char inboxBuf[12];
-    snprintf(inboxBuf, sizeof(inboxBuf), "%d/%d", logicalPos, inboxCount);
+    snprintf(inboxBuf, sizeof(inboxBuf), "%d/%d", logicalPos, currentInbox().count);
 
     int16_t x1, y1;
     uint16_t w, h;
@@ -882,6 +853,7 @@ void dispatchKey(UiKey key) {
   newMessagePending = false;
   if (wasOff && key != UiKey::Back) { drawCurrentScreen(); return; } // Wake only; long ENTER may always go home.
   const UiAction action = ui.press(key);
+  activeInbox = ui.folder;
   switch (action) {
     case UiAction::Previous: inboxShowPrev(); return;
     case UiAction::Next: inboxShowNext(); return;
@@ -979,9 +951,11 @@ void displayInbox() {
   // ─────────────────────────────────────────────
   // If no messages are stored, show a simple text
   // ─────────────────────────────────────────────
-  if (inboxCount == 0) {
+  if (currentInbox().count == 0) {
     display.setCursor(0, y);
-    display.print(F("Inbox empty"));
+    display.print(folderName(activeInbox));
+    display.setCursor(0, y + 12);
+    display.print(F("Keine Nachrichten"));
     display.display();
     return;
   }
@@ -989,16 +963,16 @@ void displayInbox() {
   // ─────────────────────────────────────────────
   // Ensure inboxCurrent points to a valid entry
   // ─────────────────────────────────────────────
-  if (inboxCurrent < 0 || inboxCurrent >= INBOX_SIZE || !inbox[inboxCurrent].valid) {
-    for (int i = INBOX_SIZE - 1; i >= 0; --i) {
-      if (inbox[i].valid) {
-        inboxCurrent = i;
+  if (currentInbox().current < 0 || currentInbox().current >= currentInbox().capacity || !currentInbox().messages[currentInbox().current].valid) {
+    for (int i = currentInbox().capacity - 1; i >= 0; --i) {
+      if (currentInbox().messages[i].valid) {
+        currentInbox().current = i;
         break;
       }
     }
   }
 
-  PageMessage &msg = inbox[inboxCurrent];
+  PageMessage &msg = currentInbox().messages[currentInbox().current];
 
   // ─────────────────────────────────────────────
   // FIRST LINE under the status bar:
@@ -1072,16 +1046,16 @@ void displayInbox() {
 
 // Show next newer message in the ring buffer
 void inboxShowNext() {
-  if (inboxCount == 0) {
+  if (currentInbox().count == 0) {
     return;
   }
 
-  int idx = inboxCurrent;
+  int idx = currentInbox().current;
 
-  for (int i = 0; i < INBOX_SIZE; ++i) {
-    idx = (idx + 1) % INBOX_SIZE;
-    if (inbox[idx].valid) {
-      inboxCurrent = idx;
+  for (int i = 0; i < currentInbox().capacity; ++i) {
+    idx = (idx + 1) % currentInbox().capacity;
+    if (currentInbox().messages[idx].valid) {
+      currentInbox().current = idx;
       displayInbox();
       return;
     }
@@ -1107,7 +1081,7 @@ void displayInboxMenu() {
   int y = STATUS_BAR_HEIGHT + 4;
 
   display.setCursor(0, y);
-  display.print(F("Nachrichten"));
+  display.print(folderName(activeInbox));
   y += 10;
 
   for (int i = 0; i < INBOX_MENU_ITEM_COUNT; ++i) {
@@ -1127,16 +1101,16 @@ void displayInboxMenu() {
 
 // Show older message in the ring buffer
 void inboxShowPrev() {
-  if (inboxCount == 0) {
+  if (currentInbox().count == 0) {
     return;
   }
 
-  int idx = inboxCurrent;
+  int idx = currentInbox().current;
 
-  for (int i = 0; i < INBOX_SIZE; ++i) {
-    idx = (idx - 1 + INBOX_SIZE) % INBOX_SIZE;
-    if (inbox[idx].valid) {
-      inboxCurrent = idx;
+  for (int i = 0; i < currentInbox().capacity; ++i) {
+    idx = (idx - 1 + currentInbox().capacity) % currentInbox().capacity;
+    if (currentInbox().messages[idx].valid) {
+      currentInbox().current = idx;
       displayInbox();
       return;
     }
@@ -1303,32 +1277,93 @@ void handlePagerReceive() {
 
       Serial.print(F("[Pager] Address:\t"));
       Serial.print(addr);
-      Serial.print(F(" [Pager] Data:\t"));
+      Serial.print(F(" [Pager] Raw:\t"));
       Serial.println(str);
 
+      SkyperHeader skyper{false, 0, 0, 0};
 #if SKYPER_DECODE
-      const SkyperHeader skyper = decodeSkyper(addr, str.begin(), str.length());
+      skyper = decodeSkyper(addr, str.begin(), str.length());
       if (skyper.valid) {
         str.remove(0, skyper.headerLength);
+        str.trim();
         Serial.printf("[Skyper] Rubric=%u Item=%u Text: ", skyper.rubric, skyper.item);
-        Serial.println(str);
+        for (unsigned char c : str) {
+          const char* glyph = pagerGermanGlyph(c, true);
+          if (glyph) Serial.print(glyph); else Serial.write(c);
+        }
+        Serial.println();
+        String readable;
+        readable.reserve(str.length() * 2);
+        for (unsigned char c : str) {
+          const char* glyph = pagerGermanGlyph(c, false);
+          if (glyph) readable += glyph;
+          else readable += static_cast<char>(c);
+        }
+        str = readable;
+      } else if (addr == 4520 || addr == 4512) {
+        Serial.println(F("[Skyper] Invalid header/payload; not stored"));
+        return;
       }
 #endif
-
-      // Evaluate time messages
       handleTimeMessage(addr, str);
-
-      // Check RIC list
-      for (size_t i = 0; i < RICNUMBER; i++) {
-        if (ric[i].ricvalue != 0 && addr == ric[i].ricvalue) {
-          // Store in inbox (RAM + LittleFS)
-          storeMessage(addr, ric[i].name, str);
-
-          // Show on display and start notification
-          ui.showMessage(); // Cancel stale delete confirmations when a new message arrives.
-          displayPage(ric[i].name, str);
-          ringBuzzer(ric[i].ringtype);
-          break;
+      int folder = -1;
+      int ringtone = 2;
+      String name;
+      if (addr == 4520 && skyper.valid) {
+        const unsigned weatherRubrics[] = {WEATHER_SKYPER_RUBRICS};
+        const unsigned warningRubrics[] = {WARNING_SKYPER_RUBRICS};
+        folder = skyperFolder(skyper.rubric, weatherRubrics,
+                             sizeof(weatherRubrics)/sizeof(weatherRubrics[0]),
+                             warningRubrics, sizeof(warningRubrics)/sizeof(warningRubrics[0]));
+        char label[16];
+        snprintf(label, sizeof(label), "R%u:%u", skyper.rubric, skyper.item);
+        name = label;
+#if SKYPER_NEWS_INBOX
+        if (folder < 0) folder = PersonalInbox;
+#endif
+      } else if (WARNING_RIC && addr == WARNING_RIC) {
+        folder = WarningInbox;
+        name = "Warnung";
+      } else {
+        for (size_t i = 0; i < RICNUMBER; ++i) {
+          if (ric[i].ricvalue && addr == ric[i].ricvalue) {
+            folder = addr == 1080 ? WeatherInbox : PersonalInbox;
+            name = ric[i].name;
+            ringtone = ric[i].ringtype;
+            break;
+          }
+        }
+      }
+      if (folder >= 0 && str.length()) {
+        const int previousFolder = activeInbox;
+        activeInbox = folder;
+        PageMessage candidate{};
+        candidate.addr = addr;
+        candidate.text = str;
+        if (folder == WarningInbox && currentInbox().containsText(candidate)) {
+          activeInbox = previousFolder;
+          return; // Repeated broadcasts do not ring or consume additional slots.
+        }
+        const int previousCurrent = currentInbox().current;
+        storeMessage(addr, name, str);
+        if (folder == WeatherInbox) {
+          // Background updates must not retarget a pending delete confirmation.
+          if (folder == previousFolder) {
+            currentInbox().current = previousCurrent;
+            if (ui.screen == Screen::ConfirmMessage || ui.screen == Screen::ConfirmAll)
+              ui.showMessage();
+          }
+          activeInbox = previousFolder;
+          if (displayIsOn && ui.screen == Screen::Home) displayHome();
+        } else {
+          ui.folder = folder;
+          ui.showMessage();
+          newMessagePending = true;
+          lastReminderBlinkMillis = millis();
+          markDisplayActivity();
+          displayInbox();
+          if (folder == PersonalInbox) ringBuzzer(ringtone);
+          else if (WARNING_AUDIBLE) ringBuzzer(WARNING_RINGTONE);
         }
       }
     } else {
@@ -1351,6 +1386,7 @@ void loop() {
   // Handle display power-save
   handleDisplayPowerSave();
   handleBatteryMeasurement();
+  flushWeatherInbox();
 
   // Handle non-blocking notification pattern
   handleNotify();
@@ -1380,17 +1416,16 @@ void displayHome() {
   display.setTextColor(WHITE);
   display.setTextSize(1);
   display.setCursor(0, 13);
-  display.print(F("DAPNET  "));
-  display.print(PERSONAL_CALLSIGN);
-  display.setCursor(0, 25);
   display.print(F("Akku: "));
   if (batteryValid) { display.print(batteryVoltage, 2); display.print(F(" V")); }
   else display.print(F("-- V"));
-  display.setCursor(0, 37);
-  display.print(F("Nachrichten: "));
-  display.print(inboxCount);
-  display.setCursor(0, 54);
-  display.print(F("ENTER: Nachrichten"));
+  for (int folder = 0; folder < 3; ++folder) {
+    display.setCursor(0, 29 + folder * 11);
+    display.print(ui.folder == folder ? '>' : ' ');
+    display.print(folderName(folder));
+    display.print(' ');
+    display.print(mailboxes[folder].count);
+  }
   display.display();
 }
 

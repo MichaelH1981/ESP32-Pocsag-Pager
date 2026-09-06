@@ -22,6 +22,13 @@ int main() {
  for(Screen screen : {Screen::Home,Screen::Inbox,Screen::Actions,Screen::ConfirmMessage,Screen::ConfirmAll}) {
   u.screen=screen;u.press(UiKey::Back);assert(u.screen==Screen::Home);
  }
+ u.folder=0;
+ u.press(UiKey::Down);assert(u.folder==1 && u.screen==Screen::Home);
+ u.press(UiKey::Down);assert(u.folder==2);
+ u.press(UiKey::Down);assert(u.folder==0);
+ u.press(UiKey::Up);assert(u.folder==2);
+ u.press(UiKey::Enter);assert(u.screen==Screen::Inbox && u.folder==2);
+ u.press(UiKey::Back);assert(u.screen==Screen::Home && u.folder==2);
  KeyTracker key;
  assert(key.update(false,0)==KeyEvent::None);
  assert(key.update(false,30)==KeyEvent::None);

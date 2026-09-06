@@ -28,12 +28,15 @@ enum class UiAction { Draw, Previous, Next, DeleteMessage, DeleteAll };
 struct PagerUi {
   Screen screen = Screen::Home;
   int selected = 0;
+  int folder = 0;
   bool confirmYes = false;
   void showMessage() { screen = Screen::Inbox; selected = 0; confirmYes = false; }
   UiAction press(UiKey key) {
     if (key == UiKey::Back) { screen = Screen::Home; selected = 0; confirmYes = false; return UiAction::Draw; }
     switch (screen) {
       case Screen::Home:
+        if (key == UiKey::Up) folder = (folder + 2) % 3;
+        if (key == UiKey::Down) folder = (folder + 1) % 3;
         if (key == UiKey::Enter) screen = Screen::Inbox;
         break;
       case Screen::Inbox:
