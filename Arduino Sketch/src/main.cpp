@@ -12,6 +12,12 @@ Frequency offset must be configured for reliable decoding. At present time, ther
 #include <Arduino.h>
 #include "periph.h"
 #include "config.h"
+#include "pager_text.h"
+#include "button_debounce.h"
+#include "pager_time.h"
+#include "pager_ui.h"
+#include "battery_filter.h"
+#include <esp_system.h>
 #include <RadioLib.h>
 #include <SPI.h>
 #include <Wire.h>
@@ -21,6 +27,18 @@ Frequency offset must be configured for reliable decoding. At present time, ther
 #include <FS.h>
 #include <LittleFS.h>
 #include <esp_bt.h>
+
+static_assert(BTN_UP != OLED_SDA && BTN_UP != OLED_SCL &&
+              BTN_ENTER != OLED_SDA && BTN_ENTER != OLED_SCL &&
+              BTN_DOWN != OLED_SDA && BTN_DOWN != OLED_SCL,
+              "Buttons must not share OLED I2C pins");
+static_assert(BATTERY_ADC_PIN < 0 ||
+              (BATTERY_ADC_PIN >= 32 && BATTERY_ADC_PIN <= 39 &&
+               BATTERY_ADC_PIN != LORA_DIO0 && BATTERY_ADC_PIN != LORA_DIO1 &&
+               BATTERY_ADC_PIN != LORA_DIO2 && BATTERY_ADC_PIN != BTN_UP &&
+               BATTERY_ADC_PIN != BTN_ENTER && BATTERY_ADC_PIN != BTN_DOWN &&
+               BATTERY_ADC_PIN != OLED_SDA && BATTERY_ADC_PIN != OLED_SCL),
+              "Battery ADC must use a free ADC1 pin, not a radio/button/display pin");
 
 // -----------------------------------------------------------------------------
 // Configuration helpers
@@ -38,22 +56,29 @@ const char* INBOX_FILE_PATH = "/inbox.log";
 // -----------------------------------------------------------------------------
 // Firmware version
 // -----------------------------------------------------------------------------
-const char* FW_VERSION = "v0.2a";
+const char* FW_VERSION = "v0.4.0";
 
 // -----------------------------------------------------------------------------
-// Battery measurement (VBAT on GPIO35)
+// Optional battery measurement on a verified free ADC1 pin
 // -----------------------------------------------------------------------------
 #if defined(ESP32)
-const int   PIN_BATTERY_ADC   = 35;    // ADC pin for battery voltage
-const float ADC_REF_VOLTAGE   = 3.3f;  // approximate ADC reference voltage
-const int   ADC_MAX_VALUE     = 4095;  // 12-bit ADC
+const int   PIN_BATTERY_ADC   = BATTERY_ADC_PIN;    // ADC pin for battery voltage
+
 
 // Voltage divider ratio: VBAT / Vadc
 // Example: 100k / 100k -> factor 2.0 (4.2V -> ~2.1V at ADC).
 // Adjust if your board uses a different divider.
-const float BAT_VDIV_RATIO    = 2.0f;
+const float BAT_VDIV_RATIO    = BATTERY_DIVIDER_RATIO;
 
-float batteryVoltage = 0.0f;          // last measured battery voltage
+float batteryVoltage = 0.0f;
+bool batteryValid = false;
+unsigned long batteryMeasuredAt = 0;
+unsigned long batteryQuietSince = 0;
+uint32_t batterySamples[16] = {};
+size_t batterySampleCount = 0;
+unsigned long lastBatterySample = 0;
+bool batteryDiscarded = false;
+int lastBatteryRadioBytes = 0;
 #endif
 
 // -----------------------------------------------------------------------------
@@ -67,7 +92,7 @@ PagerClient pager(&radio);                                           // Pager cl
 // -----------------------------------------------------------------------------
 #define SCREEN_ADDRESS 0x3C  // 0x3D for 128x64, 0x3C for 128x32 (SSD1306 address)
 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RST);
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, PAGER_OLED_RESET);
 
 // Layout constants
 const int STATUS_BAR_HEIGHT = 10;
@@ -83,11 +108,9 @@ int          displayTimeoutSeconds     = DISPLAY_TIMEOUT_SECONDS;
 int inboxCurrent = 0;  // currently selected/visible inbox message
 int inboxTotal   = 0;  // total number of messages in inbox (logical count)
 
-// Inbox menu state
-bool inboxMenuActive = false;
-int  inboxMenuIndex  = 0;
-const char* INBOX_MENU_ITEMS[] = { "Del Msg", "Del All", "Cancel" };
-const int   INBOX_MENU_ITEM_COUNT = 3;
+PagerUi ui;
+const char* INBOX_MENU_ITEMS[] = { "Hauptmenue", "Nachr. loeschen", "Alle loeschen", "Zurueck" };
+const int INBOX_MENU_ITEM_COUNT = 4;
 
 // Persistent storage status
 bool storageOk = false;
@@ -95,56 +118,19 @@ bool storageOk = false;
 // -----------------------------------------------------------------------------
 // Time structures and helpers
 // -----------------------------------------------------------------------------
-struct PagerTime {
-  int  year;
-  int  month;
-  int  day;
-  int  hour;
-  int  minute;
-  int  second;
-  bool valid;
-};
-
 PagerTime     pagerTime            = {0, 0, 0, 0, 0, 0, false};
 unsigned long lastTimeUpdateMillis = 0;
 
-// Time offset in minutes relative to UTC
-// Example for Europe/Berlin: winter = 60, summer = 120
-int timeOffsetMinutes = 60;
+// UTC conversion is configured in config.h; local RICs bypass it.
 
 // -----------------------------------------------------------------------------
 // Reading VBat
 // -----------------------------------------------------------------------------
 
-#if defined(ESP32)
-float readBatteryVoltage() {
-  // We take multiple samples and average them to reduce noise
-  const int samples = 8;
-  uint32_t sum      = 0;
+void handleBatteryMeasurement();
+void displayHome();
+void drawCurrentScreen();
 
-  for (int i = 0; i < samples; ++i) {
-    sum += analogRead(PIN_BATTERY_ADC);
-    delay(2); // small pause between samples
-  }
-
-
-  float avg = (float)sum / (float)samples;
-
-  // Convert ADC value to voltage at the pin
-  float vAdc = (avg / (float)ADC_MAX_VALUE) * ADC_REF_VOLTAGE;
-
-  // Convert to real battery voltage using the divider ratio
-  float vBat = vAdc * BAT_VDIV_RATIO;
-
-  return vBat;
-}
-#endif
-#if defined(ESP32)
-void updateBatteryMeasurement() {
-  // Update global batteryVoltage with a fresh reading
-  batteryVoltage = readBatteryVoltage();
-}
-#endif
 // -----------------------------------------------------------------------------
 // Inbox structures
 // -----------------------------------------------------------------------------
@@ -198,9 +184,6 @@ void drawClockBar();
 void displayInbox();
 void inboxShowNext();
 void inboxShowPrev();
-void onUpPressed();
-void onDownPressed();
-void onEnterPressed();
 void handleButtons();
 void handleDisplayPowerSave();
 void handleNewMessageReminder();
@@ -215,9 +198,6 @@ void markDisplayActivity();
 void displayInboxMenu();
 void deleteCurrentMessage();
 void deleteAllMessages();
-void onMenuUpPressed();
-void onMenuDownPressed();
-void onMenuEnterPressed();
 
 // -----------------------------------------------------------------------------
 // Display helpers
@@ -237,10 +217,7 @@ void displaySetOn(bool on) {
   displayIsOn = on;
 
   if (displayIsOn) {
-    // When the display is turned on, we update the battery reading
-#if defined(ESP32)
-    updateBatteryMeasurement();
-#endif
+    batteryQuietSince = millis();
     // Turn the OLED panel back on, keep buffer content
     display.ssd1306_command(SSD1306_DISPLAYON);
     display.display();
@@ -288,86 +265,6 @@ void handleDisplayPowerSave() {
 // -----------------------------------------------------------------------------
 // Time helpers
 // -----------------------------------------------------------------------------
-
-// Add minutes to pagerTime and handle day/month/year overflow
-void addMinutesToPagerTime(int deltaMin) {
-  if (!pagerTime.valid || deltaMin == 0) {
-    return;
-  }
-
-  // Convert everything to minutes
-  long totalMin = pagerTime.hour * 60L + pagerTime.minute + deltaMin;
-
-  // Extract day offset and hour/minute
-  int dayOffset = 0;
-  while (totalMin < 0) {
-    totalMin += 24L * 60L;
-    dayOffset--;
-  }
-  while (totalMin >= 24L * 60L) {
-    totalMin -= 24L * 60L;
-    dayOffset++;
-  }
-
-  pagerTime.hour   = totalMin / 60;
-  pagerTime.minute = totalMin % 60;
-
-  // Adjust date (very simple month logic, no leap years)
-  if (dayOffset != 0) {
-    pagerTime.day += dayOffset;
-
-    while (true) {
-      int daysInMonth = 31;
-      switch (pagerTime.month) {
-        case 4:
-        case 6:
-        case 9:
-        case 11:
-          daysInMonth = 30;
-          break;
-        case 2:
-          daysInMonth = 28;  // we ignore leap years here
-          break;
-        default:
-          daysInMonth = 31;
-          break;
-      }
-
-      if (pagerTime.day > daysInMonth) {
-        pagerTime.day -= daysInMonth;
-        pagerTime.month++;
-        if (pagerTime.month > 12) {
-          pagerTime.month = 1;
-          pagerTime.year++;
-        }
-      } else if (pagerTime.day <= 0) {
-        pagerTime.month--;
-        if (pagerTime.month < 1) {
-          pagerTime.month = 12;
-          pagerTime.year--;
-        }
-
-        switch (pagerTime.month) {
-          case 4:
-          case 6:
-          case 9:
-          case 11:
-            daysInMonth = 30;
-            break;
-          case 2:
-            daysInMonth = 28;
-            break;
-          default:
-            daysInMonth = 31;
-            break;
-        }
-        pagerTime.day += daysInMonth;
-      } else {
-        break;
-      }
-    }
-  }
-}
 
 // -----------------------------------------------------------------------------
 // Inbox handling (RAM + LittleFS persistence)
@@ -572,24 +469,15 @@ void loadInboxFromFS() {
 void storageInit() {
   Serial.print(F("[FS] Initializing LittleFS... "));
   if (!LittleFS.begin()) {
-    Serial.println(F("failed, trying to format..."));
-
-    // Try to format the LittleFS partition
-    if (!LittleFS.begin(true)) {
-      Serial.println(F("[FS] Formatting LittleFS failed, disabling storage"));
-      storageOk = false;
-      return;
-    } else {
-      Serial.println(F("[FS] LittleFS formatted successfully"));
-    }
-  } else {
-    Serial.println(F("success"));
+    Serial.println(F("failed; inbox preserved, storage disabled"));
+    storageOk = false;
+    return;
   }
 
+  Serial.println(F("success"));
   storageOk = true;
 
-  // Optional: if we want to start with a clean inbox after formatting,
-  // we can check if the file exists and, if not, create an empty one.
+  // Preserve the existing inbox; a new filesystem must be provisioned explicitly.
   loadInboxFromFS();
 }
 
@@ -752,53 +640,25 @@ void deleteAllMessages() {
 // Time message parsing (DAPNET time RICs)
 // -----------------------------------------------------------------------------
 
-// Parse time from DAPNET string (RIC 216/224, format "YYYYMMDDHHMMSS251203200600")
 void handleTimeMessage(uint32_t addr, const String &str) {
-  // We currently evaluate only RIC 216 and 224 with the pattern "YYYYMMDDHHMMSS"
-  if (addr == 216 || addr == 224) {
-    int idx = str.indexOf("YYYYMMDDHHMMSS");
-    if (idx >= 0 && str.length() >= idx + 14 + 12) {
-      String d = str.substring(idx + 14, idx + 14 + 12);
-      int yy   = d.substring(0, 2).toInt();
-      int mm   = d.substring(2, 4).toInt();
-      int dd   = d.substring(4, 6).toInt();
-      int hh   = d.substring(6, 8).toInt();
-      int mi   = d.substring(8, 10).toInt();
-      int ss   = d.substring(10, 12).toInt();
-
-      pagerTime.year   = 2000 + yy;
-      pagerTime.month  = mm;
-      pagerTime.day    = dd;
-      pagerTime.hour   = hh;
-      pagerTime.minute = mi;
-      pagerTime.second = ss;
-      pagerTime.valid  = true;
-
-      // Convert from UTC to local time
-      addMinutesToPagerTime(timeOffsetMinutes);
-
-      lastTimeUpdateMillis = millis();
-
-      Serial.print(F("[Time] Set (local) from addr "));
-      Serial.print(addr);
-      Serial.print(F(": "));
-      Serial.print(pagerTime.day);
-      Serial.print('.');
-      Serial.print(pagerTime.month);
-      Serial.print('.');
-      Serial.print(pagerTime.year);
-      Serial.print(' ');
-      Serial.print(pagerTime.hour);
-      Serial.print(':');
-      Serial.println(pagerTime.minute);
-    } else {
-      Serial.println(F("[Time] Time pattern found but string too short"));
-    }
+  if (!pagerTimeRic(addr)) return;
+  PagerTime parsed{};
+  if (!parsePagerTime(addr, str.c_str(), TIME_UTC_OFFSET_MINUTES, TIME_EU_DST, parsed)) {
+    Serial.printf("[Time] Invalid or incomplete time on RIC %lu; clock unchanged\n",
+                  static_cast<unsigned long>(addr));
+    return;
   }
-
-  // Optional later:
-  // - addr == 208 / 2000 (XTIME / #ZEIT)
-  // - addr == 2504 (HHMMSS   DDMMYY)
+  pagerTime = parsed;
+  lastTimeUpdateMillis = millis();
+  Serial.printf("[Time] RIC %lu (%s) -> local %04d-%02d-%02d %02d:%02d:%02d\n",
+                static_cast<unsigned long>(addr),
+                (addr == 200 || addr == 216) ? "UTC" : "local",
+                pagerTime.year, pagerTime.month, pagerTime.day,
+                pagerTime.hour, pagerTime.minute, pagerTime.second);
+  if (displayIsOn) {
+    drawClockBar();
+    display.display();
+  }
 }
 
 // Simple software clock based on millis()
@@ -824,23 +684,8 @@ void tickPagerClock() {
     }
     if (pagerTime.hour >= 24) {
       pagerTime.hour = 0;
-      // Advance date (simple month logic, no leap years)
       pagerTime.day++;
-      int daysInMonth = 31;
-      switch (pagerTime.month) {
-        case 4:
-        case 6:
-        case 9:
-        case 11:
-          daysInMonth = 30;
-          break;
-        case 2:
-          daysInMonth = 28;  // no leap year handling here
-          break;
-        default:
-          daysInMonth = 31;
-          break;
-      }
+      const int daysInMonth = pagerDaysInMonth(pagerTime.year, pagerTime.month);
       if (pagerTime.day > daysInMonth) {
         pagerTime.day = 1;
         pagerTime.month++;
@@ -962,7 +807,8 @@ void pocsagStartRx() {
 // Display init
 // -----------------------------------------------------------------------------
 void displayInit() {
-  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+  Wire.begin(OLED_SDA, OLED_SCL);
+  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS, true, false)) {
     Serial.println(F("SSD1306 allocation failed"));
     while (true) {
       // Halt
@@ -1004,8 +850,12 @@ void drawStartupScreen() {
 #if defined(ESP32)
   display.setCursor(0, 54);  // bottom line of 64px display
   display.print(F("Bat: "));
-  display.print(batteryVoltage, 2);
-  display.print(F("V"));
+  if (batteryValid) {
+    display.print(batteryVoltage, 2);
+    display.print(F("V"));
+  } else {
+    display.print(F("--"));
+  }
 #endif
 
   display.display();
@@ -1024,47 +874,34 @@ void buttonsInit() {
   pinMode(BTN_DOWN,  INPUT_PULLUP);
 }
 
-struct ButtonState {
-  uint8_t       pin;
-  bool          lastStableState;  // HIGH = not pressed (pull-up)
-  unsigned long lastChange;
-};
+KeyTracker upKey, downKey, enterKey;
 
-const unsigned long DEBOUNCE_MS = 30;
-
-ButtonState btnUp    = { BTN_UP,    HIGH, 0 };
-ButtonState btnEnter = { BTN_ENTER, HIGH, 0 };
-ButtonState btnDown  = { BTN_DOWN,  HIGH, 0 };
-
-void processButton(ButtonState &btn, void (*onPress)()) {
-  bool          raw = digitalRead(btn.pin);
-  unsigned long now = millis();
-
-  if (raw != btn.lastStableState && (now - btn.lastChange) > DEBOUNCE_MS) {
-    btn.lastChange      = now;
-    btn.lastStableState = raw;
-
-    // FALLING edge: HIGH -> LOW => button pressed
-    if (raw == LOW) {
-      onPress();
-    }
+void dispatchKey(UiKey key) {
+  const bool wasOff = !displayIsOn;
+  markDisplayActivity();
+  newMessagePending = false;
+  if (wasOff && key != UiKey::Back) { drawCurrentScreen(); return; } // Wake only; long ENTER may always go home.
+  const UiAction action = ui.press(key);
+  switch (action) {
+    case UiAction::Previous: inboxShowPrev(); return;
+    case UiAction::Next: inboxShowNext(); return;
+    case UiAction::DeleteMessage: deleteCurrentMessage(); break;
+    case UiAction::DeleteAll: deleteAllMessages(); break;
+    default: break;
   }
+  drawCurrentScreen();
 }
 
 void handleButtons() {
-  if (inboxMenuActive) {
-    // Menü aktiv: Up/Down navigieren, Enter bestätigt
-    processButton(btnUp,    onMenuUpPressed);
-    processButton(btnEnter, onMenuEnterPressed);
-    processButton(btnDown,  onMenuDownPressed);
-  } else {
-    // Normalmodus: Nachrichten blättern / Inbox anzeigen
-    processButton(btnUp,    onUpPressed);
-    processButton(btnEnter, onEnterPressed);
-    processButton(btnDown,  onDownPressed);
-  }
+  const uint32_t now = millis();
+  const auto up = upKey.update(digitalRead(BTN_UP) == HIGH, now);
+  const auto down = downKey.update(digitalRead(BTN_DOWN) == HIGH, now);
+  const auto enter = enterKey.update(digitalRead(BTN_ENTER) == HIGH, now);
+  if (enter == KeyEvent::Long) dispatchKey(UiKey::Back);
+  else if (enter == KeyEvent::Short) dispatchKey(UiKey::Enter);
+  if (up == KeyEvent::Short || up == KeyEvent::Long) dispatchKey(UiKey::Up);
+  if (down == KeyEvent::Short || down == KeyEvent::Long) dispatchKey(UiKey::Down);
 }
-
 
 // -----------------------------------------------------------------------------
 // Screen drawing helpers
@@ -1172,7 +1009,11 @@ void displayInbox() {
 #if defined(ESP32)
   // Prepare battery voltage string
   char batBuf[12];
-  snprintf(batBuf, sizeof(batBuf), "%.2fV", batteryVoltage);
+  if (batteryValid) {
+    snprintf(batBuf, sizeof(batBuf), "%.2fV", batteryVoltage);
+  } else {
+    snprintf(batBuf, sizeof(batBuf), "Bat: --");
+  }
 
   // Measure text width so we can right-align it
   int16_t bx, by;
@@ -1266,19 +1107,19 @@ void displayInboxMenu() {
   int y = STATUS_BAR_HEIGHT + 4;
 
   display.setCursor(0, y);
-  display.print(F("Inbox Menu"));
+  display.print(F("Nachrichten"));
   y += 10;
 
   for (int i = 0; i < INBOX_MENU_ITEM_COUNT; ++i) {
     display.setCursor(0, y);
-    if (i == inboxMenuIndex) {
+    if (i == ui.selected) {
       display.print('>');   // Markierung für die aktuelle Auswahl
     } else {
       display.print(' ');
     }
     display.print(' ');
     display.print(INBOX_MENU_ITEMS[i]);
-    y += 10;
+    y += 9;
   }
 
   display.display();
@@ -1348,7 +1189,7 @@ void ringBuzzer(int ringToneChoice) {
   notifyState.active         = true;
   notifyState.lastStepMillis = millis();
   notifyState.step           = 0;
-  notifyState.ringToneChoice = ringToneChoice;
+  notifyState.ringToneChoice = (ringToneChoice >= 0 && ringToneChoice < RINGTONE) ? ringToneChoice : 0;
 }
 
 // -----------------------------------------------------------------------------
@@ -1373,7 +1214,7 @@ void handleNewMessageReminder() {
 
   if (reminderPulseActive) {
     // We are currently in a short LED pulse
-    if (now >= reminderPulseEndMillis) {
+    if (static_cast<int32_t>(now - reminderPulseEndMillis) >= 0) {
       digitalWrite(LED, LOW);
       reminderPulseActive = false;
     }
@@ -1392,105 +1233,15 @@ void handleNewMessageReminder() {
 // Button event handlers
 // -----------------------------------------------------------------------------
 
-void onUpPressed() {
-  // Any key press acknowledges pending messages
-  newMessagePending = false;
-
-  // One message "up" (older message)
-  markDisplayActivity();
-  inboxShowPrev();
-}
-
-void onDownPressed() {
-  newMessagePending = false;
-
-  // One message "down" (newer message)
-  markDisplayActivity();
-  inboxShowNext();
-}
-void onMenuUpPressed() {
-  newMessagePending = false;
-  markDisplayActivity();
-
-  if (!inboxMenuActive) return;
-
-  inboxMenuIndex--;
-  if (inboxMenuIndex < 0) {
-    inboxMenuIndex = INBOX_MENU_ITEM_COUNT - 1;
-  }
-  displayInboxMenu();
-}
-
-void onMenuDownPressed() {
-  newMessagePending = false;
-  markDisplayActivity();
-
-  if (!inboxMenuActive) return;
-
-  inboxMenuIndex++;
-  if (inboxMenuIndex >= INBOX_MENU_ITEM_COUNT) {
-    inboxMenuIndex = 0;
-  }
-  displayInboxMenu();
-}
-
-void onMenuEnterPressed() {
-  newMessagePending = false;
-  markDisplayActivity();
-
-  if (!inboxMenuActive) return;
-
-  switch (inboxMenuIndex) {
-    case 0: // Del Msg
-      deleteCurrentMessage();
-      inboxMenuActive = false;
-      displayInbox();
-      break;
-
-    case 1: // Del All
-      deleteAllMessages();
-      inboxMenuActive = false;
-      displayInbox();
-      break;
-
-    case 2: // Cancel
-    default:
-      inboxMenuActive = false;
-      displayInbox();
-      break;
-  }
-}
-
-void onEnterPressed() {
-  // Jede Taste quittiert das Reminder-Blinken
-  newMessagePending = false;
-  markDisplayActivity();
-
-  // Wenn Display aus war, erst aufwecken und nur die Inbox zeigen
-  if (!displayIsOn) {
-    displaySetOn(true);
-    displayInbox();
-    return;
-  }
-
-  // Wenn keine Nachrichten vorhanden sind, macht ein Lösch-Menü keinen Sinn
-  if (inboxCount == 0) {
-    displayInbox();
-    return;
-  }
-
-  // Inbox-Menü öffnen
-  inboxMenuActive = true;
-  inboxMenuIndex  = 0;
-  displayInboxMenu();
-}
-
 // -----------------------------------------------------------------------------
 // Setup & main loop
 // -----------------------------------------------------------------------------
 
 void setup() {
   Serial.begin(115200);
+  Serial.printf("\n[Pager] Firmware %s\n", FW_VERSION);
+  Serial.printf("[Boot] Reset reason=%d, free heap=%u\n", int(esp_reset_reason()), ESP.getFreeHeap());
+  Serial.flush(); // Complete UART output before changing the CPU clock.
   pinMode(LED, OUTPUT);
   digitalWrite(LED, LOW);
 
@@ -1505,31 +1256,92 @@ void setup() {
   esp_bt_controller_disable();
 #endif
 
+  Serial.println(F("[Boot] Power setup complete; initializing OLED"));
+  Serial.flush();
   displayInit();
+  Serial.println(F("[Boot] OLED ready"));
 
 #if defined(ESP32)
-  // Configure ADC for battery measurement
-  analogReadResolution(12);                           // 0..4095
-  analogSetPinAttenuation(PIN_BATTERY_ADC, ADC_11db); // up to ~3.6V at pin
-
-  // Give the regulator and battery a short moment to settle after boot
-  delay(500);
-
-  // First battery measurement for the splash screen
-  batteryVoltage = readBatteryVoltage();
+  if (PIN_BATTERY_ADC >= 0) {
+    analogReadResolution(12);
+    analogSetPinAttenuation(PIN_BATTERY_ADC, ADC_11db);
+    batteryQuietSince = millis();
+  } else {
+    Serial.println(F("[Battery] Disabled: configure a verified free ADC pin"));
+  }
 #endif
 
   // Show startup screen with battery voltage
   drawStartupScreen();
   delay(1500);   // keep splash screen for 1.5s
 
+  Serial.println(F("[Boot] Initializing buttons and storage"));
   buttonsInit();
   storageInit();   // Initialize LittleFS and restore inbox
   pocsagInit();
   pocsagStartRx();
+  displayHome();
+}
+
+void handlePagerReceive() {
+  // Wait for at least 2 POCSAG batches to fit short/medium messages
+  if (pager.available() >= 2) {
+    Serial.print(F("[Pager] Received pager data, decoding ... "));
+
+    static uint8_t received[513];
+    size_t receivedLength = sizeof(received) - 1;
+    uint32_t addr = 0;
+    int state = pager.readData(received, &receivedLength, &addr);
+    received[receivedLength < sizeof(received) ? receivedLength : sizeof(received)-1] = 0;
+    String str;
+    if (state == RADIOLIB_ERR_NONE) {
+      str = receivedLength ? reinterpret_cast<const char*>(received) : "<tone>";
+    }
+
+    if (state == RADIOLIB_ERR_NONE) {
+      Serial.println(F("success!"));
+
+      Serial.print(F("[Pager] Address:\t"));
+      Serial.print(addr);
+      Serial.print(F(" [Pager] Data:\t"));
+      Serial.println(str);
+
+#if SKYPER_DECODE
+      const SkyperHeader skyper = decodeSkyper(addr, str.begin(), str.length());
+      if (skyper.valid) {
+        str.remove(0, skyper.headerLength);
+        Serial.printf("[Skyper] Rubric=%u Item=%u Text: ", skyper.rubric, skyper.item);
+        Serial.println(str);
+      }
+#endif
+
+      // Evaluate time messages
+      handleTimeMessage(addr, str);
+
+      // Check RIC list
+      for (size_t i = 0; i < RICNUMBER; i++) {
+        if (ric[i].ricvalue != 0 && addr == ric[i].ricvalue) {
+          // Store in inbox (RAM + LittleFS)
+          storeMessage(addr, ric[i].name, str);
+
+          // Show on display and start notification
+          ui.showMessage(); // Cancel stale delete confirmations when a new message arrives.
+          displayPage(ric[i].name, str);
+          ringBuzzer(ric[i].ringtype);
+          break;
+        }
+      }
+    } else {
+      Serial.print(F("failed, code "));
+      Serial.println(state);
+    }
+  }
+
 }
 
 void loop() {
+  handlePagerReceive();
+
   // Advance internal pager clock
   tickPagerClock();
 
@@ -1538,6 +1350,7 @@ void loop() {
 
   // Handle display power-save
   handleDisplayPowerSave();
+  handleBatteryMeasurement();
 
   // Handle non-blocking notification pattern
   handleNotify();
@@ -1554,42 +1367,86 @@ void loop() {
     display.display();
   }
 
-  // Wait for at least 2 POCSAG batches to fit short/medium messages
-  if (pager.available() >= 2) {
-    Serial.print(F("[Pager] Received pager data, decoding ... "));
-
-    String   str;
-    uint32_t addr  = 0;
-    int      state = pager.readData(str, 0, &addr);
-
-    if (state == RADIOLIB_ERR_NONE) {
-      Serial.println(F("success!"));
-
-      Serial.print(F("[Pager] Address:\t"));
-      Serial.print(String(addr));
-      Serial.print(F(" [Pager] Data:\t"));
-      Serial.println(str);
-
-      // Evaluate time messages
-      handleTimeMessage(addr, str);
-
-      // Check RIC list
-      for (int i = 0; i < RICNUMBER; i++) {
-        if (addr == ric[i].ricvalue) {
-          // Store in inbox (RAM + LittleFS)
-          storeMessage(addr, ric[i].name, str);
-
-          // Show on display and start notification
-          displayPage(ric[i].name, str);
-          ringBuzzer(ric[i].ringtype);
-        }
-      }
-    } else {
-      Serial.print(F("failed, code "));
-      Serial.println(state);
-    }
-  }
 
   // For debugging we can call:
   // dumpInboxToSerial();
+}
+
+
+void displayHome() {
+  if (!displayIsOn) return;
+  display.clearDisplay();
+  drawClockBar();
+  display.setTextColor(WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 13);
+  display.print(F("DAPNET  "));
+  display.print(PERSONAL_CALLSIGN);
+  display.setCursor(0, 25);
+  display.print(F("Akku: "));
+  if (batteryValid) { display.print(batteryVoltage, 2); display.print(F(" V")); }
+  else display.print(F("-- V"));
+  display.setCursor(0, 37);
+  display.print(F("Nachrichten: "));
+  display.print(inboxCount);
+  display.setCursor(0, 54);
+  display.print(F("ENTER: Nachrichten"));
+  display.display();
+}
+
+void drawCurrentScreen() {
+  if (!displayIsOn) return;
+  switch (ui.screen) {
+    case Screen::Home: displayHome(); break;
+    case Screen::Inbox: displayInbox(); break;
+    case Screen::Actions: displayInboxMenu(); break;
+    default:
+      display.clearDisplay();
+      drawClockBar();
+      display.setTextSize(1);
+      display.setTextColor(WHITE);
+      display.setCursor(0, 16);
+      display.print(ui.screen == Screen::ConfirmAll ? F("Alle loeschen?") : F("Nachricht loeschen?"));
+      display.setCursor(0, 32);
+      display.print(ui.confirmYes ? F("  Nein     > Ja") : F("> Nein       Ja"));
+      display.setCursor(0, 53);
+      display.print(F("ENTER: bestaetigen"));
+      display.display();
+      break;
+  }
+}
+
+void handleBatteryMeasurement() {
+  if (PIN_BATTERY_ADC < 0) return;
+  const unsigned long now = millis();
+  // Never sample during a notification, raw receive activity or immediately
+  // after a screen/power change. Do not stop the receiver to measure voltage.
+  const int radioBytes = radio.available();
+  const bool radioChanged = radioBytes != lastBatteryRadioBytes;
+  lastBatteryRadioBytes = radioBytes;
+  if (notifyState.active || reminderPulseActive || radioChanged ||
+      now - displayLastActiveMillis < 500) {
+    batteryQuietSince = now;
+    batterySampleCount = 0;
+    batteryDiscarded = false;
+    return;
+  }
+  if (now - batteryQuietSince < 500) return;
+  if (batteryMeasuredAt && now - batteryMeasuredAt < 30000) return;
+  if (now - lastBatterySample < 5) return;
+  lastBatterySample = now;
+  const uint32_t mv = analogReadMilliVolts(PIN_BATTERY_ADC);
+  if (!batteryDiscarded) { batteryDiscarded = true; return; }
+  batterySamples[batterySampleCount++] = mv;
+  if (batterySampleCount < 16) return;
+  float measured = 0;
+  batteryValid = batteryVolts(batterySamples, BAT_VDIV_RATIO,
+                              BATTERY_CALIBRATION_GAIN, BATTERY_CALIBRATION_OFFSET, measured);
+  if (batteryValid) batteryVoltage = measured;
+  batteryMeasuredAt = now;
+  batterySampleCount = 0;
+  batteryDiscarded = false;
+  if (batteryValid) Serial.printf("[Battery] %.3f V (calibrated ADC, divider %.2f)\n", batteryVoltage, BAT_VDIV_RATIO);
+  else Serial.println(F("[Battery] Invalid measurement; check wiring/calibration"));
+  if (ui.screen == Screen::Home && displayIsOn) displayHome();
 }

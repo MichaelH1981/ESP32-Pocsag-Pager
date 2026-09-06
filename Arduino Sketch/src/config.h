@@ -3,12 +3,50 @@ User-modifiable configuration
 In the near future, bring this to a menu, and load-edit them in SPIFFS
 */
 
+#pragma once
+#include <stddef.h>
+#include <stdint.h>
+#if __has_include("config_local.h")
+#include "config_local.h"
+#endif
+#ifndef PERSONAL_RIC
+#define PERSONAL_RIC 0 // Disabled until configured in config_local.h
+#endif
+#ifndef PERSONAL_CALLSIGN
+#define PERSONAL_CALLSIGN "UNCONFIGURED"
+#endif
+#ifndef BATTERY_ADC_PIN
+#define BATTERY_ADC_PIN -1 // Local T3 config enables 35 after its LoRa bridge is removed.
+#endif
+#ifndef BATTERY_DIVIDER_RATIO
+#define BATTERY_DIVIDER_RATIO 2.0f
+#endif
+#ifndef BATTERY_CALIBRATION_GAIN
+#define BATTERY_CALIBRATION_GAIN 1.0f
+#endif
+#ifndef BATTERY_CALIBRATION_OFFSET
+#define BATTERY_CALIBRATION_OFFSET 0.0f
+#endif
+#ifndef SKYPER_NEWS_INBOX
+#define SKYPER_NEWS_INBOX 0 // Set to 1 to store/alert on all Skyper news (RIC 4520).
+#endif
+#ifndef SKYPER_DECODE
+#define SKYPER_DECODE 1
+#endif
+// Standard UTC offset; EU DST adds 60 minutes in summer (Germany defaults).
+// Already-local RIC 208/224 never receive another offset.
+#ifndef TIME_UTC_OFFSET_MINUTES
+#define TIME_UTC_OFFSET_MINUTES 60
+#endif
+#ifndef TIME_EU_DST
+#define TIME_EU_DST 1
+#endif
 //Default settings
 
-extern float offset = 0.0000;  // device specific, in MHz. VHF: 0.0014 UHF: 0.0044
-extern float frequency = 439.98750;
+const float offset = 0.0000;  // device specific, in MHz. VHF: 0.0014 UHF: 0.0044
+const float frequency = 439.98750;
 
-#define RICNUMBER 8 //Maximum number of RIC usable
+
 #define RINGTONE 4 //Number of ringtones available
 #define NOTENUMBER 8 //Number of tones per ringtone
 
@@ -22,8 +60,8 @@ extern float frequency = 439.98750;
 #define DISPLAY_TIMEOUT_SECONDS 30
 
 struct ric{
-    long ricvalue; //RIC adress itself
-    char* name; //"Nickname"
+    uint32_t ricvalue; //RIC adress itself
+    const char* name; //"Nickname"
     int ringtype; //TBD: ring "melody"
     bool placeholder1;
     bool placeholder2;
@@ -32,12 +70,17 @@ struct ric{
 /*RICs the pager will respond to. As described by the struct above:
 {RIC,"NAME",ringtone(see below),TBD,TBD}
 */
-ric[RICNUMBER]={
-        {YOUR_RIC, "YOUR_CALL",2,0,0},
+ric[]={
+        {PERSONAL_RIC, PERSONAL_CALLSIGN,2,0,0},
         {65009, "IND",2,0,0},
         {1040, "EMERGENCY",0,0,0},
         {1080, "APRSWX",1,0,0},
+#if SKYPER_NEWS_INBOX
+        {4520, "SKYPER",2,0,0},
+#endif
 };
+
+constexpr size_t RICNUMBER = sizeof(ric) / sizeof(ric[0]);
 
 //"melodies", 130ms tones. Individual frequencies, 8 slots. 0 equals to a 130ms silence.
 int beepTones[RINGTONE][NOTENUMBER]={

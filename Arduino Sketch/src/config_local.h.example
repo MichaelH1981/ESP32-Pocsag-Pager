@@ -1,0 +1,21 @@
+#pragma once
+#define PERSONAL_RIC 1234567
+#define PERSONAL_CALLSIGN "YOUR_CALL"
+// Copy this file to config_local.h (ignored by Git) and set your actual RIC.
+
+// T3 V1.6.1 uses its internal 100k/100k battery divider on GPIO35.
+// REMOVE the old external LoRa-to-GPIO35 bridge BEFORE enabling the ADC.
+// Firmware 0.4 uses the board's internal LoRa DIO1 connection on GPIO33.
+// Keep the existing DIO2-to-GPIO34 bridge.
+// #define BATTERY_ADC_PIN 35
+// #define BATTERY_DIVIDER_RATIO 2.0f
+// #define BATTERY_CALIBRATION_GAIN 1.0f
+// #define BATTERY_CALIBRATION_OFFSET 0.0f
+
+// Enable all Skyper news in the inbox only if desired (may be very busy).
+// #define SKYPER_NEWS_INBOX 1
+
+// Germany: standard UTC+1 plus EU summer-time conversion for UTC messages.
+// Already-local RIC 208/224 are never shifted again.
+// #define TIME_UTC_OFFSET_MINUTES 60
+// #define TIME_EU_DST 1

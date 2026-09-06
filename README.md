@@ -1,119 +1,112 @@
-# ESP32-Pocsag-Pager
- 
-# Libraries
- * [RadioLib](https://github.com/jgromes/RadioLib)
- * Adafruit GFX (I plan to move tu U8G2 at some point)
- * Adafruiy SSD1306
- 
- 
-# Hardware
-Uses an ESP32 LORA32 TTGO. You must bridge DIO1 to pin 35 and DIO2 to pin 34 (broken out as LORA1 and LORA2 on the headers). 
-I added a buzzer on pin 14, and plan to add buttons in the near future
+# ESP32 DAPNET Pager — v0.4.0
 
-# Setup
-Ideally, you should calibrate your SX1278 as it probably has an offset. Right now, best way would be to use a TXCO SDR and use another RadioLib sketch example to transmit a continuous signal and determine the offset from there.
-In config.h, change the RIC with yours, fiddle with the tones, and enjoy!
+POCSAG pager for the LILYGO T3 V1.6.1, based on
+[ManoDaSilva's ESP32-Pocsag-Pager](https://github.com/ManoDaSilva/ESP32-Pocsag-Pager).
+Receives DAPNET messages with RadioLib and provides a persistent inbox,
+clock, battery voltage display and three-button navigation.
 
-## ESP32 DAPNET Pager – Extended Version
+## Hardware and upgrade from earlier versions
 
-This version is based on the original ESP32 Pager Proof of Concept, but significantly extends and refactors the codebase.  
-The goal is to transform the simple demo pager into a fully usable handheld device with message history, persistent storage, a clock, UI navigation, and power-saving features.
+**Remove the external LoRa bridge to GPIO35 before enabling battery measurement.**
+GPIO35 is connected to the board's internal battery voltage divider. Older
+firmware also used it for the radio clock, which interfered with voltage readings.
+Version 0.4 uses the board's internal DIO1 connection on GPIO33 instead.
+Keep the existing DIO2-to-GPIO34 bridge.
 
-### New Features and Improvements
+| Function | GPIO |
+| --- | --- |
+| LoRa SPI SCK / MISO / MOSI / CS | 5 / 19 / 27 / 18 |
+| LoRa RESET / DIO0 / DIO1 | 23 / 26 / 33 |
+| LoRa DIO2 data | 34 (existing external bridge) |
+| Battery ADC | 35 (internal 100k/100k divider) |
+| OLED SDA / SCL | 21 / 22 |
+| OLED hardware reset | Disabled |
+| UP / ENTER / DOWN | 12 / 13 / 15 |
+| Buzzer / LED | 14 / 25 |
 
-- **Persistent Inbox (LittleFS)**
-  - Received messages are stored in a ring buffer (`INBOX_SIZE`).
-  - Inbox is saved to LittleFS at `/inbox.log`.
-  - All messages are restored on startup.
-  - Displays message index and timestamp.
+Connect buttons to ground. Do not use an SD card with this pin assignment:
+its pins overlap with the buttons and buzzer. Other board revisions require
+verification of the actual schematic and wiring.
 
-- **Time Synchronization via DAPNET**
-  - Supports parsing of DAPNET time RICs (e.g. 216/224).
-  - Internal software clock based on `millis()`.
-  - Configurable timezone offset (`timeOffsetMinutes`).
-  - Clock shown in the top status bar.
+## Build and configuration
 
-- **Status Bar & Updated Display Layout**
-  - Top bar shows date/time (left) and inbox position (right).
-  - New startup screen with drawn DAPNET-style logo and firmware version.
-  - Message view with automatic word wrapping for optimal readability.
+1. Open `Arduino Sketch` in VS Code with PlatformIO.
+2. Copy `src/config_local.h.example` to `src/config_local.h`.
+3. Set your personal RIC and callsign. After removing the GPIO35 bridge,
+   uncomment `#define BATTERY_ADC_PIN 35` to enable the internal battery ADC.
+4. Build with `pio run` from `Arduino Sketch`, then use the PlatformIO upload task.
 
-- **Display Power-Save Mode**
-  - Configurable timeout using `DISPLAY_TIMEOUT_SECONDS` (0 = always on).
-  - Display automatically turns off after inactivity.
-  - Wakes on button press or new message.
-  - Uses correct OLED power commands (`SSD1306_DISPLAYOFF/ON`).
+Personal settings are ignored by Git. Without a local configuration the project
+builds, but personal RIC 0 and battery measurement are disabled. Frequency and
+receiver offset are configured in `src/config.h`.
 
-- **Button Input & Inbox Navigation**
-  - Three debounced buttons: UP / ENTER / DOWN.
-  - ENTER opens inbox from any screen.
-  - UP/DOWN navigate through older/newer messages.
-  - Any keypress acknowledges new-message reminders.
+The project pins Espressif32 6.9.0 and RadioLib 5.6.0. A checked build script
+applies a small, reproducible receive-buffer bounds fix to the pinned RadioLib
+source; do not remove the `extra_scripts` setting from `platformio.ini`.
 
-- **Non-Blocking Notification System**
-  - LED and buzzer operate via a state machine (`handleNotify()`).
-  - No blocking `delay()` calls.
-  - Main loop stays responsive.
+Firmware updates do not require a filesystem upload or a full flash erase.
+A LittleFS mount failure disables persistence for that boot rather than
+formatting the existing message store. A blank filesystem needs explicit setup.
 
-- **New Message Reminder**
-  - LED pulse every 30 seconds until acknowledged.
-  - Efficient and non-intrusive.
+## Operation
 
-- **ESP32 Power Optimizations**
-  - CPU clock reduced to 80 MHz.
-  - WiFi and Bluetooth are fully disabled at startup.
-  - Reduced idle power consumption.
+- Home: date/time, battery voltage in V, message count.
+- Short ENTER: open inbox; from the inbox, open the action menu.
+- Hold ENTER for 800 ms: return to home from any screen.
+- UP/DOWN: browse messages or choose a menu item.
+- Action menu: home, delete message, delete all, back.
+- Deletion requires confirmation, with **No** selected by default.
+- A short key press while the screen is off wakes it without executing a hidden action.
 
-### Compatibility
+## Reception and time
 
-The original POCSAG functionality (RadioLib, `pager.begin()`, decoding, RIC filtering) remains intact and compatible.  
-All added features integrate seamlessly with the original concept while significantly expanding functionality and user experience.
+Skyper news on RIC 4520 and rubric labels on 4512 are decoded without shifting
+their protocol headers. Ordinary messages stay unchanged. Skyper news are
+printed in readable form in the serial monitor; enable `SKYPER_NEWS_INBOX` to
+store and alert on all of them.
 
-### ToDo
+Both DAPNET time formats are supported:
 
+| RIC | Format | Time basis |
+| --- | --- | --- |
+| 200 / 208 | `XTIME=HHmmddMMyy` | UTC / local |
+| 216 / 224 | `YYYYMMDDHHMMSS` followed by `yyMMddHHmmss` | UTC / local |
 
-## ESP32 DAPNET Pager – Extended Version Deutsch
+UTC messages use the configured standard offset plus optional EU summer time.
+Local messages are adopted as sent. Invalid dates leave the clock unchanged.
+XTIME has minute precision; seconds are set to zero. Summer-time conversion is
+performed when a UTC message arrives, not autonomously without synchronization.
 
-Diese Version basiert auf dem ursprünglichen ESP32-Pager-Proof-of-Concept, erweitert den Code aber deutlich um folgende Funktionen:
+## Battery voltage
 
-- **Persistente Inbox (LittleFS)**
-  - Empfangene Nachrichten werden in einem Ringspeicher (`INBOX_SIZE`) gehalten.
-  - Die Inbox wird zusätzlich in LittleFS unter `/inbox.log` gespeichert.
-  - Beim Start werden vorhandene Nachrichten wiederhergestellt.
-  - Anzeige der Nachrichten inkl. Index und Zeitstempel.
+The firmware samples calibrated ADC millivolts without stopping reception,
+after a quiet settling period and outside notifications. It discards the first
+reading, takes 16 samples and averages the middle 12 to reject outliers.
+Measurements normally update every 30 seconds when conditions permit.
 
-- **Zeit-Synchronisation über DAPNET**
-  - Auswertung spezieller Zeit-RICs (z.B. 216/224) im DAPNET-Format.
-  - Interne Software-Uhr (basierend auf `millis()`).
-  - Konfigurierbarer Zeitzonen-Offset (`timeOffsetMinutes`, z.B. +60 für CET).
+`-- V` means disabled, not yet measured or invalid. The displayed value is the
+last plausible battery terminal voltage; USB charging can affect this voltage.
+For a meter-based calibration use `BATTERY_CALIBRATION_GAIN` and
+`BATTERY_CALIBRATION_OFFSET` in the local configuration.
 
-- **Statusleiste & neues Display-Layout**
-  - Obere Statusbar mit Datum/Uhrzeit sowie Inbox-Position (`x/n`).
-  - Neue Startseite mit gezeichnetem DAPNET-Logo und Firmware-Version.
-  - Nachrichtenanzeige mit Wort-/Zeilenumbruch, optimiert für 128×64 OLED.
+## Verification and limitations
 
-- **Display-Powersave**
-  - Konfigurierbarer Timeout über `DISPLAY_TIMEOUT_SECONDS` (0 = immer an).
-  - Automatisches Abschalten des OLEDs nach Inaktivität.
-  - Automatisches Aufwachen bei Tastenbetätigung oder neuen Nachrichten.
+Version 0.4 was built and tested on a T3 V1.6.1: boot, battery display around
+4.18 V, button navigation, reception on GPIO33 and RIC208 synchronization were
+confirmed. Host tests cover the actual RadioLib receive function, buffer limits,
+UI transitions, battery filtering, Skyper decoding and time/calendar conversion.
+See [release notes](RELEASE-v0.4.0.md) and [test instructions](tests/README.md).
 
-- **Button-Steuerung & Inbox-Navigation**
-  - Drei Tasten (UP / ENTER / DOWN) mit Debounce.
-  - ENTER: zeigt jederzeit die Inbox.
-  - UP/DOWN: blättern durch ältere/jüngere Nachrichten.
-  - Jede Tastenbetätigung quittiert ausstehende „New Message“-Reminder.
+The reproduced heap overflow is fixed by checking every received character
+against a fixed 512-byte payload capacity; oversized messages are discarded.
+This does not redesign RadioLib's message assembly or add BCH correction.
+Long/back-to-back messages and prolonged high traffic still need endurance
+coverage. The existing inbox rewrites the file on message changes.
 
-- **Nicht-blockierende Benachrichtigung**
-  - LED + Buzzer laufen über einen Zustandsautomaten (`handleNotify()`).
-  - Keine langen `delay()`-Blöcke mehr – die `loop()` bleibt reaktionsfähig.
+## Libraries and credits
 
-- **New-Message-Reminder**
-  - Sobald eine neue Nachricht empfangen wurde, wird ein Flag gesetzt.
-  - Solange die Nachricht nicht durch Tastendruck „wahrgenommen“ wurde,
-    sendet der Pager alle 30 Sekunden einen kurzen LED-Puls.
+- [RadioLib](https://github.com/jgromes/RadioLib)
+- Adafruit SSD1306, GFX and BusIO
+- Original pager concept by ManoDaSilva; extended firmware by this repository.
 
-- **Energiesparoptimierungen (ESP32)**
-  - CPU-Frequenz auf 80 MHz reduziert.
-  - WiFi und Bluetooth bei Start deaktiviert.
-
-Die Funk- und POCSAG-Grundlogik (RadioLib, `pager.begin()`, `pager.readData()`, RIC-Filterung) bleibt kompatibel mit dem Originalcode, wurde aber in ein erweitertes Gesamtkonzept mit Inbox, Zeit-Handling und UI integriert.
+See [LICENSE](LICENSE).

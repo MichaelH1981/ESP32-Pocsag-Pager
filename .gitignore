@@ -1,0 +1,8 @@
+.DS_Store
+Arduino Sketch/.pio/
+Arduino Sketch/.vscode/
+Arduino Sketch/.idea/
+Arduino Sketch/src/config_local.h
+artifacts/
+*.before-*
+__pycache__/
