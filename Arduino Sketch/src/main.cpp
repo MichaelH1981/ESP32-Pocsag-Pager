@@ -18,6 +18,7 @@ Frequency offset must be configured for reliable decoding. At present time, ther
 #include "pager_ui.h"
 #include "pager_mailbox.h"
 #include "battery_filter.h"
+#include "pager_power.h"
 #include <esp_system.h>
 #include <RadioLib.h>
 #include <SPI.h>
@@ -57,7 +58,7 @@ static_assert(BATTERY_ADC_PIN < 0 ||
 // -----------------------------------------------------------------------------
 // Firmware version
 // -----------------------------------------------------------------------------
-const char* FW_VERSION = "v0.4.1";
+const char* FW_VERSION = "v0.5.0-dev";
 
 // -----------------------------------------------------------------------------
 // Optional battery measurement on a verified free ADC1 pin
@@ -87,6 +88,8 @@ int lastBatteryRadioBytes = 0;
 // -----------------------------------------------------------------------------
 SX1278 radio = new Module(LORA_SS, LORA_DIO0, LORA_RST, LORA_DIO1);  // Radio module instance
 PagerClient pager(&radio);                                           // Pager client instance
+void IRAM_ATTR pagerCaptureBit() { radio.readBit(LORA_DIO2); }
+PagerPower pagerPower(radio, pagerCaptureBit);
 
 // -----------------------------------------------------------------------------
 // Display setup
@@ -762,6 +765,7 @@ void pocsagStartRx() {
   int state = pager.startReceive(LORA_DIO2, 200, 0);  // Interrupt on DIO2
   if (state == RADIOLIB_ERR_NONE) {
     Serial.println(F("success!"));
+    pagerPower.begin(PAGER_POWER_MODE);
   } else {
     Serial.print(F("failed, code "));
     Serial.println(state);
@@ -1259,7 +1263,7 @@ void setup() {
 
 void handlePagerReceive() {
   // Wait for at least 2 POCSAG batches to fit short/medium messages
-  if (pager.available() >= 2) {
+  if (pager.available() >= 2 || pagerPower.shouldDrainTail()) {
     Serial.print(F("[Pager] Received pager data, decoding ... "));
 
     static uint8_t received[513];
@@ -1274,6 +1278,8 @@ void handlePagerReceive() {
 
     if (state == RADIOLIB_ERR_NONE) {
       Serial.println(F("success!"));
+
+      pagerPower.received();
 
       Serial.print(F("[Pager] Address:\t"));
       Serial.print(addr);
@@ -1375,6 +1381,7 @@ void handlePagerReceive() {
 }
 
 void loop() {
+  pagerPower.poll();
   handlePagerReceive();
 
   // Advance internal pager clock
@@ -1403,6 +1410,9 @@ void loop() {
     display.display();
   }
 
+
+  pagerPower.idle(!displayIsOn && !notifyState.active && !reminderPulseActive &&
+                  batterySampleCount == 0, pager.available() >= 2);
 
   // For debugging we can call:
   // dumpInboxToSerial();

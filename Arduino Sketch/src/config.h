@@ -12,6 +12,13 @@ In the near future, bring this to a menu, and load-edit them in SPIFFS
 #ifndef PERSONAL_RIC
 #define PERSONAL_RIC 0 // Disabled until configured in config_local.h
 #endif
+#ifndef PAGER_POWER_MODE
+#define PAGER_POWER_MODE 0 // 0: baseline, 1: observe preamble, 2: experimental Light-sleep
+#endif
+static_assert(PAGER_POWER_MODE >= 0 && PAGER_POWER_MODE <= 2, "Invalid pager power mode");
+#ifndef PAGER_SLEEP_BUSY_RSSI_DBM
+#define PAGER_SLEEP_BUSY_RSSI_DBM -90.0f // Veto only; preamble wake has no RSSI threshold.
+#endif
 #ifndef PERSONAL_CALLSIGN
 #define PERSONAL_CALLSIGN "UNCONFIGURED"
 #endif

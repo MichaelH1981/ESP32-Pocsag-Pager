@@ -1,6 +1,27 @@
 # Project-local, reproducible bounds hardening for the pinned RadioLib 5.6.0.
 from pathlib import Path
 
+def patch_direct_reset(path):
+    path = Path(path)
+    text = path.read_text()
+    marker = 'void resetDirectBuffer()'
+    if marker in text:
+        return
+    anchor = '    virtual void readBit(RADIOLIB_PIN_TYPE pin);'
+    if text.count(anchor) != 1:
+        raise RuntimeError('Unexpected PhysicalLayer header; inspect before patching')
+    method = '''
+    // Pager experimental wake driver: caller MUST detach capture ISR first.
+    void resetDirectBuffer() {
+      _bufferBitPos = 0;
+      _bufferWritePos = 0;
+      _bufferReadPos = 0;
+      _syncBuffer = 0;
+      _gotSync = (_directSyncWordLen == 0);
+    }
+'''
+    path.write_text(text.replace(anchor, anchor + method))
+
 def patch_pager(path):
     path = Path(path)
     text = path.read_text()
@@ -30,3 +51,4 @@ else:
     Import('env')
     dependency = Path(env.subst('$PROJECT_LIBDEPS_DIR')) / env.subst('$PIOENV') / 'RadioLib/src/protocols/Pager/Pager.cpp'
     patch_pager(dependency)
+    patch_direct_reset(dependency.parent.parent / 'PhysicalLayer/PhysicalLayer.h')
