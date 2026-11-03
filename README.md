@@ -11,6 +11,18 @@ Die aktuelle Firmware empfängt persönliche Rufe, Wetter- und Pegeldaten sowie
 konfigurierbare Warnmeldungen. Sie zeigt Uhrzeit und Akkuspannung an und speichert
 Nachrichten dauerhaft im Flash.
 
+## Entwicklung: Version 0.5
+
+Auf diesem Zweig entsteht **0.5.0-dev** mit einem stromsparenden Empfangstreiber.
+Der SX1278 bleibt im Empfang und weckt den ESP32 bei einer erkannten Präambel aus
+dem Light-Sleep. Erste Tests mit Zeit-, Skyper- und persönlichen Nachrichten
+funktionieren. Stromaufnahme und Laufzeit sind noch nicht gemessen.
+
+Der Schlafmodus wird ausdrücklich mit `pio run -e preamble-sleep` gebaut; der
+Standard-Build verwendet weiterhin den bisherigen Empfang ohne Light-Sleep.
+Den Aufbau, die Testergebnisse und offene Punkte beschreibt die
+[Treiber-Dokumentation](docs/PREAMBLE-WAKE.md).
+
 ## Was die Firmware kann
 
 - DAPNET/POCSAG-Empfang über den SX1278

@@ -91,9 +91,9 @@ A subsequent personal-message test on 0.5.0-dev received and persisted the
 owner's second test message after RF wake. An Arduino 2.x `tone()` first-use
 diagnostic (`LEDC is not initialized`) was traced to `ledcAttachPin()` reading
 duty before `ledcWriteTone()` configures the timer. A silent channel-0 timer
-initialisation has been added and builds successfully. This last change is
-not yet flashed while the owner checks the visible notification/LED reminder;
-resetting now would clear the runtime unread-reminder flag. The LED uses GPIO25
+initialisation has been added and builds successfully. This last change has
+not yet been flashed or tested on the device. The owner believes the LED reminder
+worked, but a dedicated manual confirmation is still pending. The LED uses GPIO25
 directly and is unrelated to the LEDC diagnostic. The timer-wake loop services
 the reminder, and sleep is inhibited during the 50 ms pulse itself.
 

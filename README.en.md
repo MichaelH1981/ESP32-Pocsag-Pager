@@ -10,6 +10,18 @@ The current firmware receives personal calls, weather and water-level data, and
 configurable warning messages. It shows the time and battery voltage and keeps
 received messages in flash storage.
 
+## Version 0.5 development
+
+This branch contains **0.5.0-dev**, with a new receiver driver for lower power
+consumption. The SX1278 keeps listening and wakes the ESP32 from Light-sleep
+when it detects a preamble. Initial tests received time broadcasts, Skyper data
+and personal messages successfully. Current draw and battery life have not yet
+been measured.
+
+Build the sleep variant explicitly with `pio run -e preamble-sleep`. The default
+build keeps the previous reception mode without Light-sleep. See the
+[driver notes](docs/PREAMBLE-WAKE.md) for wiring, test results and remaining work.
+
 ## Features
 
 - DAPNET/POCSAG reception using the SX1278
