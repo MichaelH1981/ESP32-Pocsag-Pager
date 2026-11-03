@@ -5,13 +5,15 @@
 #include <esp_sleep.h>
 #include <esp_timer.h>
 #include "pager_power_policy.h"
+#include "pager_rssi.h"
 
-// Mode 1 observes the hardware detector with the original bit ISR running.
+// Mode 1 observes the hardware detector with continuous bit capture running.
 // Mode 2 additionally sleeps the ESP32; the SX1278 stays in continuous RX.
 // The hardware signal is a preamble candidate, not a validated POCSAG call.
 class PagerPower {
  public:
-  PagerPower(SX1278& radio, void (*captureBit)()) : radio_(radio), captureBit_(captureBit) {}
+  PagerPower(SX1278& radio, void (*suspendCapture)(), void (*startCapture)(), int (*queued)())
+      : radio_(radio), suspendCapture_(suspendCapture), startCapture_(startCapture), queued_(queued) {}
   void begin(int mode) {
     mode_ = mode;
     policy_.begin(millis());
@@ -46,6 +48,8 @@ class PagerPower {
 
   void received() {
     policy_.activity(millis());
+    rssi_.received(millis());
+    if (rssi_.valid()) Serial.printf("[RSSI] Last checked reception peak: %.1f dBm\n", rssi_.last());
     if (mode_) {
       ++messages_;
       Serial.printf("[Power] received preamble-age-ms=%ld capturing=%d\n",
@@ -53,15 +57,10 @@ class PagerPower {
     }
   }
 
-  bool shouldDrainTail() const {
-    // The original consumer waits for two batches. A final shorter remainder
-    // must be drained once the transmission has been quiet, or it blocks sleep
-    // forever and may be prepended to the next transmission.
-    return mode_ == 2 && policy_.maySleep(millis(), true, false) && radio_.available() >= 4;
-  }
+  void activity() { policy_.activity(millis()); }
+  const PagerRssi& rssi() const { return rssi_; }
 
   void poll() {
-    if (!mode_) return;
     const uint32_t now = millis();
     if (uint32_t(now - sampledAt_) >= 20) {
       sampledAt_ = now;
@@ -70,10 +69,12 @@ class PagerPower {
       // skipReceive MUST be true: the default getRSSI() calls startReceive()
       // in FSK and silently switches out of our continuous direct mode.
       const float rssi = radio_.getRSSI(true);
+      currentRssi_ = rssi;
+      rssi_.sample(rssi, now);
       if (rssi < minRssi_) minRssi_ = rssi;
       if (rssi > maxRssi_) maxRssi_ = rssi;
-      if (rssi >= PAGER_SLEEP_BUSY_RSSI_DBM) policy_.signal(now);
-      if (digitalRead(LORA_DIO0)) {
+      if (mode_ && rssi >= PAGER_SLEEP_BUSY_RSSI_DBM) policy_.signal(now);
+      if (mode_ && digitalRead(LORA_DIO0)) {
         ++preambles_;
         lastPreamble_ = now;
         policy_.activity(now);
@@ -81,12 +82,13 @@ class PagerPower {
         clearPreamble();
       }
     }
+    if (!mode_) return;
     if (uint32_t(now - reportedAt_) >= 60000) {
       reportedAt_ = now;
       Serial.printf("[Power] mode=%d preambles=%lu messages=%lu RF-wakes=%lu sleep-ms=%llu heap=%u RSSI=%.1f range=%.1f..%.1f queued=%d\n",
           mode_, (unsigned long)preambles_, (unsigned long)messages_,
           (unsigned long)rfWakes_, (unsigned long long)(sleptUs_ / 1000), ESP.getFreeHeap(),
-          radio_.getRSSI(true), minRssi_, maxRssi_, radio_.available());
+          currentRssi_, minRssi_, maxRssi_, queued_());
       minRssi_ = 0;
       maxRssi_ = -150;
     }
@@ -104,9 +106,8 @@ class PagerPower {
     // also covers a preamble that arrives while entering Light-sleep.
     if (digitalRead(LORA_DIO0)) { policy_.activity(now); resumeCapture(); return; }
     if (capturing_) {
-      radio_.clearDio1Action();
+      suspendCapture_();
       capturing_ = false;
-      radio_.resetDirectBuffer(); // Only legal with the capture ISR detached.
     }
     Serial.flush();
     const int64_t start = esp_timer_get_time();
@@ -131,22 +132,24 @@ class PagerPower {
 
  private:
   SX1278& radio_;
-  void (*captureBit_)();
+  void (*suspendCapture_)();
+  void (*startCapture_)();
+  int (*queued_)();
   PagerPowerPolicy policy_;
+  PagerRssi rssi_;
   int mode_ = 0;
   bool capturing_ = true;
   uint32_t sampledAt_ = 0, reportedAt_ = 0, lastPreamble_ = 0;
   uint32_t preambles_ = 0, messages_ = 0, rfWakes_ = 0;
   uint64_t sleptUs_ = 0;
-  float minRssi_ = 0, maxRssi_ = -150;
+  float currentRssi_ = -150, minRssi_ = 0, maxRssi_ = -150;
   void clearPreamble() {
     radio_.getMod()->SPIwriteRegister(RADIOLIB_SX127X_REG_IRQ_FLAGS_1,
                                      RADIOLIB_SX127X_FLAG_PREAMBLE_DETECT);
   }
   void resumeCapture() {
     if (capturing_) return;
-    radio_.resetDirectBuffer();
-    radio_.setDirectAction(captureBit_);
+    startCapture_();
     capturing_ = true;
   }
   void fail(const char* reason) {

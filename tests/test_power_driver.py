@@ -92,15 +92,14 @@ int esp_light_sleep_start(){
  if(wakeRf)pins[26]=1;
  return sleepError;
 }
-void bit(){}
+void stopCapture(){capture=false;}
+void startCapture(){assert(!capture);++resetCalls;capture=true;}
+int queuedWords(){return 0;}
 int main(){
  pins[12]=pins[13]=pins[15]=1;
- SX1278 radio; PagerPower power(radio,bit); power.begin(2);
+ SX1278 radio; PagerPower power(radio,stopCapture,startCapture,queuedWords); power.begin(2);
  assert(radio.mod.regs[0x1f]==0xca);
  clockMs=8000;
-  assert(!power.shouldDrainTail());
-  radio.queued=4; assert(power.shouldDrainTail());
-  radio.queued=3; assert(!power.shouldDrainTail());radio.queued=0;
  power.idle(false,false);assert(!sleepCalls && capture);
  power.idle(true,true);assert(!sleepCalls && capture);
  pins[12]=0;power.idle(true,false);assert(!sleepCalls);
@@ -111,7 +110,6 @@ int main(){
  power.poll();
  assert(pins[26]==0);
  power.idle(true,false);assert(sleepCalls==2 && capture); // receive hold
-  radio.queued=100;assert(!power.shouldDrainTail());radio.queued=0;
  power.received();clockMs+=7999;power.idle(true,false);assert(sleepCalls==2);
  clockMs+=1;
   wakeRf=false;sleepError=ESP_ERR_SLEEP_REJECT;
@@ -120,11 +118,15 @@ int main(){
  wakeRf=false;sleepError=1;
   power.idle(true,false);assert(sleepCalls==4 && capture); // fallback
   clockMs+=10000;power.idle(true,false);assert(sleepCalls==4);
- PagerPower observer(radio,bit);observer.begin(1);
+ PagerPower observer(radio,stopCapture,startCapture,queuedWords);observer.begin(1);
   clockMs+=10000;observer.idle(true,false);assert(sleepCalls==4 && capture);
- setupError=1;PagerPower broken(radio,bit);broken.begin(2);
+ setupError=1;PagerPower broken(radio,stopCapture,startCapture,queuedWords);broken.begin(2);
   broken.idle(true,false);assert(sleepCalls==4 && capture);
  assert(resetCalls>=2);
+ setupError=0;PagerPower baseline(radio,stopCapture,startCapture,queuedWords);baseline.begin(0);
+ radio.rssi=-67.5f;clockMs+=20;baseline.poll();baseline.received();
+ assert(baseline.rssi().valid() && baseline.rssi().last()==-67.5f);
+ assert(capture && sleepCalls==4); // RSSI works without enabling sleep or remapping DIOs.
  puts("PASS: actual driver GPIO mapping, preamble W1C, ISR suspension/restoration, timer/RF wake, hold and error fallback");
 }
 '''

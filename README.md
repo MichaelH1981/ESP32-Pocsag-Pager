@@ -19,7 +19,7 @@ dem Light-Sleep. Erste Tests mit Zeit-, Skyper- und persönlichen Nachrichten
 funktionieren. Stromaufnahme und Laufzeit sind noch nicht gemessen.
 
 Der Schlafmodus wird ausdrücklich mit `pio run -e preamble-sleep` gebaut; der
-Standard-Build verwendet weiterhin den bisherigen Empfang ohne Light-Sleep.
+Standard-Build verwendet denselben Decoder mit dauerhaft wachem ESP32.
 Den Aufbau, die Testergebnisse und offene Punkte beschreibt die
 [Treiber-Dokumentation](docs/PREAMBLE-WAKE.md).
 
@@ -31,6 +31,7 @@ Den Aufbau, die Testergebnisse und offene Punkte beschreibt die
 - Dekodierung der Skyper-Nachrichten auf RIC 4520
 - Uhrzeitsynchronisation über die DAPNET-Zeit-RICs
 - Akkuspannungsanzeige über den internen Spannungsteiler des Boards
+- im Entwicklungsstand 0.5: RSSI-Spitzenwert des letzten geprüften Empfangs in dBm
 - Bedienung mit drei Tasten und Rücksprung zum Hauptbildschirm durch langes ENTER
 - dauerhafte Speicherung mit LittleFS
 - Schutz vor zu langen Empfangsdaten, die in älteren Versionen einen Neustart
@@ -120,9 +121,11 @@ Empfang, Zeitabgleich, Akkumessung, Tastenbedienung und die Zuordnung von Wetter
 und Skyper-Nachrichten. Automatisierte Tests decken zusätzlich Parser,
 Kalenderlogik, Postfächer und die Begrenzung des Empfangspuffers ab.
 
-Die Firmware verwirft Nachrichten, die größer als der Empfangspuffer sind. Eine
-BCH-Fehlerkorrektur und ein grundlegender Umbau der RadioLib-Nachrichtenmontage
-gehören derzeit nicht zum Projekt.
+Die Firmware verwirft Nachrichten, die größer als der Empfangspuffer sind.
+Der Entwicklungsstand 0.5 verwendet einen eigenen fortlaufenden Decoder mit
+BCH-Fehlerkorrektur und geprüften Nachrichtengrenzen. Er wird derzeit gegen
+die Originalmeldungen des Pi-Star getestet und ist noch keine stabile Version.
+Die [Untersuchung des Empfangsfehlers](docs/RECEIVE-DECODER.md) beschreibt die Änderungen.
 
 Weitere Details stehen in den [Hinweisen zu Version 0.4.1](RELEASE-v0.4.1.md)
 und in der [Testanleitung](tests/README.md).

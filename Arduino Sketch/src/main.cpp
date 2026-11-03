@@ -19,6 +19,8 @@ Frequency offset must be configured for reliable decoding. At present time, ther
 #include "pager_mailbox.h"
 #include "battery_filter.h"
 #include "pager_power.h"
+#include "pocsag_receiver.h"
+#include <soc/gpio_struct.h>
 #include <esp_system.h>
 #include <RadioLib.h>
 #include <SPI.h>
@@ -58,7 +60,7 @@ static_assert(BATTERY_ADC_PIN < 0 ||
 // -----------------------------------------------------------------------------
 // Firmware version
 // -----------------------------------------------------------------------------
-const char* FW_VERSION = "v0.5.0-dev";
+const char* FW_VERSION = "v0.5.0-dev-rx3";
 
 // -----------------------------------------------------------------------------
 // Optional battery measurement on a verified free ADC1 pin
@@ -87,9 +89,27 @@ int lastBatteryRadioBytes = 0;
 // Radio & pager instances
 // -----------------------------------------------------------------------------
 SX1278 radio = new Module(LORA_SS, LORA_DIO0, LORA_RST, LORA_DIO1);  // Radio module instance
-PagerClient pager(&radio);                                           // Pager client instance
-void IRAM_ATTR pagerCaptureBit() { radio.readBit(LORA_DIO2); }
-PagerPower pagerPower(radio, pagerCaptureBit);
+PagerClient pager(&radio);  // Direct-mode configuration only; application owns RX.
+void handleDecodedMessage(const PocsagReceiver::Message&, void*);
+PocsagBitQueue pagerBits;
+PocsagReceiver pagerReceiver(handleDecodedMessage);
+void IRAM_ATTR pagerCaptureBit(void*) {
+  // SX1278 continuous FSK polarity is opposite to POCSAG. Read the GPIO
+  // register directly: the entire interrupt path must work during flash I/O.
+#if LORA_DIO2 >= 32
+  pagerBits.pushBit(!(GPIO.in1.val & (1u << (LORA_DIO2 - 32))));
+#else
+  pagerBits.pushBit(!(GPIO.in & (1u << LORA_DIO2)));
+#endif
+}
+void resetPagerCapture() { pagerBits.reset(); pagerReceiver.reset(); }
+void suspendPagerCapture() { gpio_intr_disable(static_cast<gpio_num_t>(LORA_DIO1)); }
+void startPagerCapture() {
+  resetPagerCapture();
+  gpio_intr_enable(static_cast<gpio_num_t>(LORA_DIO1));
+}
+int queuedPagerWords() { return int(pagerBits.pending()); }
+PagerPower pagerPower(radio, suspendPagerCapture, startPagerCapture, queuedPagerWords);
 
 // -----------------------------------------------------------------------------
 // Display setup
@@ -508,7 +528,7 @@ void storeMessage(uint32_t addr, const String &ricName, const String &text) {
 // on power failure during the last 30 seconds. Radio decoding always runs first.
 void flushWeatherInbox() {
   if (!mailboxes[WeatherInbox].dirty || millis() - lastWeatherSave < 30000 ||
-      radio.available() >= 4) return;
+      pagerBits.pending() || pagerReceiver.active()) return;
   const int previous = activeInbox;
   activeInbox = WeatherInbox;
   saveInboxToFS();
@@ -762,9 +782,21 @@ void pocsagInit() {
 void pocsagStartRx() {
   // Start receiving POCSAG messages
   Serial.print(F("[Pager] Starting to listen ... "));
-  int state = pager.startReceive(LORA_DIO2, 200, 0);  // Interrupt on DIO2
+  int state = radio.setFrequency(frequency + offset);
+  if (!state) state = radio.setBitRate(1.2);
+  if (!state) state = radio.setFrequencyDeviation(4.5);
+  pinMode(LORA_DIO2, INPUT);
+  pinMode(LORA_DIO1, INPUT);
+  // Arduino's default GPIO ISR service is not IRAM-safe in this core. Own the
+  // service and handler so flash writes cannot suspend the 1200 bit/s capture.
+  if (!state) state = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+  if (!state) state = gpio_set_intr_type(static_cast<gpio_num_t>(LORA_DIO1), GPIO_INTR_POSEDGE);
+  if (!state) state = gpio_isr_handler_add(static_cast<gpio_num_t>(LORA_DIO1), pagerCaptureBit, nullptr);
+  if (!state) state = radio.receiveDirect();
   if (state == RADIOLIB_ERR_NONE) {
     Serial.println(F("success!"));
+    suspendPagerCapture();
+    startPagerCapture();
     pagerPower.begin(PAGER_POWER_MODE);
   } else {
     Serial.print(F("failed, code "));
@@ -1268,123 +1300,130 @@ void setup() {
   displayHome();
 }
 
-void handlePagerReceive() {
-  // Wait for at least 2 POCSAG batches to fit short/medium messages
-  if (pager.available() >= 2 || pagerPower.shouldDrainTail()) {
-    Serial.print(F("[Pager] Received pager data, decoding ... "));
+void handleDecodedMessage(const PocsagReceiver::Message& message, void*) {
+  const uint32_t addr = message.address;
+  String str = message.length ? message.text : "<tone>";
+  Serial.println(F("[Pager] Complete BCH-checked message"));
+  pagerPower.received();
 
-    static uint8_t received[513];
-    size_t receivedLength = sizeof(received) - 1;
-    uint32_t addr = 0;
-    int state = pager.readData(received, &receivedLength, &addr);
-    received[receivedLength < sizeof(received) ? receivedLength : sizeof(received)-1] = 0;
-    String str;
-    if (state == RADIOLIB_ERR_NONE) {
-      str = receivedLength ? reinterpret_cast<const char*>(received) : "<tone>";
-    }
+  Serial.print(F("[Pager] Address:\t"));
+  Serial.print(addr);
+  Serial.print(F(" [Pager] Raw:\t"));
+  Serial.println(str);
 
-    if (state == RADIOLIB_ERR_NONE) {
-      Serial.println(F("success!"));
-
-      pagerPower.received();
-
-      Serial.print(F("[Pager] Address:\t"));
-      Serial.print(addr);
-      Serial.print(F(" [Pager] Raw:\t"));
-      Serial.println(str);
-
-      SkyperHeader skyper{false, 0, 0, 0};
+  SkyperHeader skyper{false, 0, 0, 0};
 #if SKYPER_DECODE
-      skyper = decodeSkyper(addr, str.begin(), str.length());
-      if (skyper.valid) {
-        str.remove(0, skyper.headerLength);
-        str.trim();
-        Serial.printf("[Skyper] Rubric=%u Item=%u Text: ", skyper.rubric, skyper.item);
-        for (unsigned char c : str) {
-          const char* glyph = pagerGermanGlyph(c, true);
-          if (glyph) Serial.print(glyph); else Serial.write(c);
-        }
-        Serial.println();
-        String readable;
-        readable.reserve(str.length() * 2);
-        for (unsigned char c : str) {
-          const char* glyph = pagerGermanGlyph(c, false);
-          if (glyph) readable += glyph;
-          else readable += static_cast<char>(c);
-        }
-        str = readable;
-      } else if (addr == 4520 || addr == 4512) {
-        Serial.println(F("[Skyper] Invalid header/payload; not stored"));
-        return;
-      }
+  skyper = decodeSkyper(addr, str.begin(), str.length());
+  if (skyper.valid) {
+    str.remove(0, skyper.headerLength);
+    str.trim();
+    Serial.printf("[Skyper] Rubric=%u Item=%u Text: ", skyper.rubric, skyper.item);
+    for (unsigned char c : str) {
+      const char* glyph = pagerGermanGlyph(c, true);
+      if (glyph) Serial.print(glyph); else Serial.write(c);
+    }
+    Serial.println();
+    String readable;
+    readable.reserve(str.length() * 2);
+    for (unsigned char c : str) {
+      const char* glyph = pagerGermanGlyph(c, false);
+      if (glyph) readable += glyph;
+      else readable += static_cast<char>(c);
+    }
+    str = readable;
+  } else if (addr == 4520 || addr == 4512) {
+    Serial.println(F("[Skyper] Invalid header/payload; not stored"));
+    return;
+  }
 #endif
-      handleTimeMessage(addr, str);
-      int folder = -1;
-      int ringtone = 2;
-      String name;
-      if (addr == 4520 && skyper.valid) {
-        const unsigned weatherRubrics[] = {WEATHER_SKYPER_RUBRICS};
-        const unsigned warningRubrics[] = {WARNING_SKYPER_RUBRICS};
-        folder = skyperFolder(skyper.rubric, weatherRubrics,
-                             sizeof(weatherRubrics)/sizeof(weatherRubrics[0]),
-                             warningRubrics, sizeof(warningRubrics)/sizeof(warningRubrics[0]));
-        char label[16];
-        snprintf(label, sizeof(label), "R%u:%u", skyper.rubric, skyper.item);
-        name = label;
+  handleTimeMessage(addr, str);
+  int folder = -1;
+  int ringtone = 2;
+  String name;
+  if (addr == 4520 && skyper.valid) {
+    const unsigned weatherRubrics[] = {WEATHER_SKYPER_RUBRICS};
+    const unsigned warningRubrics[] = {WARNING_SKYPER_RUBRICS};
+    folder = skyperFolder(skyper.rubric, weatherRubrics,
+                         sizeof(weatherRubrics)/sizeof(weatherRubrics[0]),
+                         warningRubrics, sizeof(warningRubrics)/sizeof(warningRubrics[0]));
+    char label[16];
+    snprintf(label, sizeof(label), "R%u:%u", skyper.rubric, skyper.item);
+    name = label;
 #if SKYPER_NEWS_INBOX
-        if (folder < 0) folder = PersonalInbox;
+    if (folder < 0) folder = PersonalInbox;
 #endif
-      } else if (WARNING_RIC && addr == WARNING_RIC) {
-        folder = WarningInbox;
-        name = "Warnung";
-      } else {
-        for (size_t i = 0; i < RICNUMBER; ++i) {
-          if (ric[i].ricvalue && addr == ric[i].ricvalue) {
-            folder = addr == 1080 ? WeatherInbox : PersonalInbox;
-            name = ric[i].name;
-            ringtone = ric[i].ringtype;
-            break;
-          }
-        }
+  } else if (WARNING_RIC && addr == WARNING_RIC) {
+    folder = WarningInbox;
+    name = "Warnung";
+  } else {
+    for (size_t i = 0; i < RICNUMBER; ++i) {
+      if (ric[i].ricvalue && addr == ric[i].ricvalue) {
+        folder = addr == 1080 ? WeatherInbox : PersonalInbox;
+        name = ric[i].name;
+        ringtone = ric[i].ringtype;
+        break;
       }
-      if (folder >= 0 && str.length()) {
-        const int previousFolder = activeInbox;
-        activeInbox = folder;
-        PageMessage candidate{};
-        candidate.addr = addr;
-        candidate.text = str;
-        if (folder == WarningInbox && currentInbox().containsText(candidate)) {
-          activeInbox = previousFolder;
-          return; // Repeated broadcasts do not ring or consume additional slots.
-        }
-        const int previousCurrent = currentInbox().current;
-        storeMessage(addr, name, str);
-        if (folder == WeatherInbox) {
-          // Background updates must not retarget a pending delete confirmation.
-          if (folder == previousFolder) {
-            currentInbox().current = previousCurrent;
-            if (ui.screen == Screen::ConfirmMessage || ui.screen == Screen::ConfirmAll)
-              ui.showMessage();
-          }
-          activeInbox = previousFolder;
-          if (displayIsOn && ui.screen == Screen::Home) displayHome();
-        } else {
-          ui.folder = folder;
-          ui.showMessage();
-          newMessagePending = true;
-          lastReminderBlinkMillis = millis();
-          markDisplayActivity();
-          displayInbox();
-          if (folder == PersonalInbox) ringBuzzer(ringtone);
-          else if (WARNING_AUDIBLE) ringBuzzer(WARNING_RINGTONE);
-        }
-      }
-    } else {
-      Serial.print(F("failed, code "));
-      Serial.println(state);
     }
   }
+  if (folder >= 0 && str.length()) {
+    const int previousFolder = activeInbox;
+    activeInbox = folder;
+    PageMessage candidate{};
+    candidate.addr = addr;
+    candidate.text = str;
+    if (folder == WarningInbox && currentInbox().containsText(candidate)) {
+      activeInbox = previousFolder;
+      return; // Repeated broadcasts do not ring or consume additional slots.
+    }
+    const int previousCurrent = currentInbox().current;
+    storeMessage(addr, name, str);
+    if (folder == WeatherInbox) {
+      // Background updates must not retarget a pending delete confirmation.
+      if (folder == previousFolder) {
+        currentInbox().current = previousCurrent;
+        if (ui.screen == Screen::ConfirmMessage || ui.screen == Screen::ConfirmAll)
+          ui.showMessage();
+      }
+      activeInbox = previousFolder;
+    } else {
+      ui.folder = folder;
+      ui.showMessage();
+      newMessagePending = true;
+      lastReminderBlinkMillis = millis();
+      markDisplayActivity();
+      displayInbox();
+      if (folder == PersonalInbox) ringBuzzer(ringtone);
+      else if (WARNING_AUDIBLE) ringBuzzer(WARNING_RINGTONE);
+    }
+  }
+  if (displayIsOn && ui.screen == Screen::Home) displayHome();
+}
 
+void handlePagerReceive() {
+  static uint32_t seenOverruns = 0, reportedAt = 0;
+  const uint32_t before = pagerReceiver.stats.words;
+  uint32_t chunk;
+  while (true) {
+    const uint32_t overruns = pagerBits.overruns();
+    if (overruns != seenOverruns) {
+      pagerReceiver.reset();
+      pagerBits.discardQueued();
+      seenOverruns = overruns;
+      Serial.printf("[RX] Capture overrun=%lu; incomplete message discarded\n", (unsigned long)overruns);
+    }
+    if (!pagerBits.pop(chunk)) break;
+    pagerReceiver.chunk(chunk, millis());
+  }
+  pagerReceiver.expire(millis());
+  if (pagerReceiver.stats.words != before) pagerPower.activity();
+  if (uint32_t(millis() - reportedAt) >= 60000) {
+    reportedAt = millis();
+    const auto& s = pagerReceiver.stats;
+    Serial.printf("[RX] syncs=%lu words=%lu corrected-bits=%lu rejected=%lu lost-sync=%lu discarded=%lu messages=%lu overruns=%lu\n",
+      (unsigned long)s.syncs, (unsigned long)s.words, (unsigned long)s.correctedBits,
+      (unsigned long)s.rejectedWords, (unsigned long)s.lostSync,
+      (unsigned long)s.discardedMessages, (unsigned long)s.messages, (unsigned long)seenOverruns);
+  }
 }
 
 void loop() {
@@ -1419,7 +1458,7 @@ void loop() {
 
 
   pagerPower.idle(!displayIsOn && !notifyState.active && !reminderPulseActive &&
-                  batterySampleCount == 0, pager.available() >= 2);
+                  batterySampleCount == 0, pagerBits.pending() || pagerReceiver.active());
 
   // For debugging we can call:
   // dumpInboxToSerial();
@@ -1436,8 +1475,13 @@ void displayHome() {
   display.print(F("Akku: "));
   if (batteryValid) { display.print(batteryVoltage, 2); display.print(F(" V")); }
   else display.print(F("-- V"));
+  display.setCursor(0, 22);
+  display.print(F("RX max: "));
+  if (pagerPower.rssi().valid()) display.print(pagerPower.rssi().last(), 0);
+  else display.print(F("--"));
+  display.print(F(" dBm"));
   for (int folder = 0; folder < 3; ++folder) {
-    display.setCursor(0, 29 + folder * 11);
+    display.setCursor(0, 32 + folder * 11);
     display.print(ui.folder == folder ? '>' : ' ');
     display.print(folderName(folder));
     display.print(' ');
@@ -1473,7 +1517,7 @@ void handleBatteryMeasurement() {
   const unsigned long now = millis();
   // Never sample during a notification, raw receive activity or immediately
   // after a screen/power change. Do not stop the receiver to measure voltage.
-  const int radioBytes = radio.available();
+  const int radioBytes = int(pagerReceiver.stats.words);
   const bool radioChanged = radioBytes != lastBatteryRadioBytes;
   lastBatteryRadioBytes = radioBytes;
   if (notifyState.active || reminderPulseActive || radioChanged ||

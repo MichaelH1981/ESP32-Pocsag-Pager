@@ -19,7 +19,7 @@ and personal messages successfully. Current draw and battery life have not yet
 been measured.
 
 Build the sleep variant explicitly with `pio run -e preamble-sleep`. The default
-build keeps the previous reception mode without Light-sleep. See the
+build uses the same decoder with the ESP32 continuously awake. See the
 [driver notes](docs/PREAMBLE-WAKE.md) for wiring, test results and remaining work.
 
 ## Features
@@ -36,6 +36,10 @@ build keeps the previous reception mode without Light-sleep. See the
   versions
 
 ## Hardware
+
+The 0.5 development branch also shows the cached RSSI peak of the last checked
+reception on the home screen, in dBm. It reuses read-only RSSI sampling; details
+are in the [receive investigation](docs/RECEIVE-DECODER.md#rssi-display-rx2).
 
 The firmware targets the **LILYGO T3 V1.6.1** with an SX1278 and has been tested
 on that board.
@@ -118,9 +122,10 @@ battery readings, button navigation, and the routing of weather and Skyper
 messages were checked on the device. Automated tests also cover the parsers,
 calendar handling, folders, and receive-buffer limit.
 
-Messages larger than the receive buffer are discarded. BCH error correction
-and a full redesign of RadioLib's message assembly are currently outside the
-scope of this project.
+Messages larger than the receive buffer are discarded. The 0.5 development
+branch uses a streaming decoder with BCH error correction and checked message
+boundaries. Comparison against the Pi-Star originals is in progress; this is
+not a stable release. See the [receive investigation](docs/RECEIVE-DECODER.md).
 
 See the [v0.4.1 release notes](RELEASE-v0.4.1.md) and the
 [test instructions](tests/README.md) for more detail.

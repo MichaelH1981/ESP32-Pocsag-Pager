@@ -16,7 +16,7 @@ https://cdn.sparkfun.com/assets/7/7/3/2/2/SX1276_Datasheet.pdf
 ## Build environments
 
 - `ttgo-lora32-v21`: baseline, no sleeping (`PAGER_POWER_MODE=0`).
-- `preamble-observe`: detector diagnostics with original capture running (mode 1).
+- `preamble-observe`: detector diagnostics with continuous CPU capture (mode 1).
 - `preamble-sleep`: experimental Light-sleep and GPIO wake (mode 2).
 
 Build with `pio run -e preamble-observe` or `pio run -e preamble-sleep`.
@@ -25,7 +25,7 @@ Personal settings remain in the ignored `src/config_local.h`.
 ## Sleep sequence
 
 Sleeping requires display off, no notification/reminder pulse, no ADC sequence,
-released buttons, no data meeting the normal two-batch decoder threshold,
+released buttons, an empty capture queue and no incomplete message,
 eight seconds since activity,
 and three seconds without RSSI above `PAGER_SLEEP_BUSY_RSSI_DBM` (-90 dBm).
 RSSI only vetoes sleep; it is not
@@ -35,19 +35,20 @@ RSSI is read with `getRSSI(true)`: RadioLib's default argument would call
 Adjust the veto for the site and test weak, long transmissions before treating
 reception as reliable.
 
-The driver detaches only the ESP's bit ISR and clears partial software capture.
-Before sleeping, the application drains complete words left in a final shorter
-batch after the quiet/hold window. The regular two-batch receive threshold is
-unchanged during a transmission. Only an incomplete final word is discarded.
+The driver disables only the ESP's bit interrupt. The streaming decoder consumes
+each queued chunk immediately; it does not wait for two batches or publish
+fragments when a queue runs empty. An incomplete message expires after 1.5 s
+without a valid word. Capture is cleared with the interrupt disabled, before
+resuming acquisition.
 It then enters Light-sleep, waking on DIO0 high, any button low, or a 250 ms timer
 for housekeeping. It does not remap the radio clock or stop the receiver.
 On RF/button wake, capture resumes before serial output, UI or ADC work.
 GPIO/setup/sleep errors fall back to continuous CPU reception and are logged.
 
-RadioLib is patched with an additive `resetDirectBuffer()` method. This may
-only be called with the capture ISR detached. It clears both byte indices,
-partial-byte state and software synchronisation before reacquiring a sync word.
-The existing received-character bounds patch remains in place.
+The application now owns bit capture and message assembly; see
+[the receive investigation](RECEIVE-DECODER.md). The legacy RadioLib bounds and
+reset patches remain for the pinned dependency and its regression tests; the
+application no longer uses that buffer or `PagerClient::readData()`.
 
 ## What the tests must establish
 
@@ -91,8 +92,9 @@ A subsequent personal-message test on 0.5.0-dev received and persisted the
 owner's second test message after RF wake. An Arduino 2.x `tone()` first-use
 diagnostic (`LEDC is not initialized`) was traced to `ledcAttachPin()` reading
 duty before `ledcWriteTone()` configures the timer. A silent channel-0 timer
-initialisation has been added and builds successfully. This last change has
-not yet been flashed or tested on the device. The owner believes the LED reminder
+initialisation was included in the later `rx1` personal-message run; the
+diagnostic did not recur. Sound output itself was not checked remotely.
+The owner believes the LED reminder
 worked, but a dedicated manual confirmation is still pending. The LED uses GPIO25
 directly and is unrelated to the LEDC diagnostic. The timer-wake loop services
 the reminder, and sleep is inhibited during the 50 ms pulse itself.
