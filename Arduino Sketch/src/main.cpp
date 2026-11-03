@@ -1232,6 +1232,13 @@ void setup() {
   WiFi.disconnect(true);
   btStop();
   esp_bt_controller_disable();
+
+  // Arduino 2.x tone() uses channel 0 and attaches the pin before configuring
+  // its timer. Initialise it silently so the first post-wake alert can read
+  // its duty without "LEDC is not initialized". No pin is attached here.
+  if (ledcSetup(0, ATONE, 10) == 0) {
+    Serial.println(F("[Boot] Buzzer PWM setup failed"));
+  }
 #endif
 
   Serial.println(F("[Boot] Power setup complete; initializing OLED"));

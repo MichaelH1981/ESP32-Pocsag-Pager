@@ -87,6 +87,16 @@ The functional driver run used the initial 0.4.2-dev label. Per the project
 owner's request, this work is now versioned 0.5.0-dev; only the version string
 changed between that tested binary and the renamed build.
 
+A subsequent personal-message test on 0.5.0-dev received and persisted the
+owner's second test message after RF wake. An Arduino 2.x `tone()` first-use
+diagnostic (`LEDC is not initialized`) was traced to `ledcAttachPin()` reading
+duty before `ledcWriteTone()` configures the timer. A silent channel-0 timer
+initialisation has been added and builds successfully. This last change is
+not yet flashed while the owner checks the visible notification/LED reminder;
+resetting now would clear the runtime unread-reminder flag. The LED uses GPIO25
+directly and is unrelated to the LEDC diagnostic. The timer-wake loop services
+the reminder, and sleep is inhibited during the 50 ms pulse itself.
+
 Two issues found during testing were fixed before the final run: the default
 RSSI accessor leaves continuous reception (use `getRSSI(true)`), and a single
 trailing batch could keep the CPU awake forever when the consumer waits for two.
