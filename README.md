@@ -11,15 +11,17 @@ Die aktuelle Firmware empfängt persönliche Rufe, Wetter- und Pegeldaten sowie
 konfigurierbare Warnmeldungen. Sie zeigt Uhrzeit und Akkuspannung an und speichert
 Nachrichten dauerhaft im Flash.
 
-## Entwicklung: Version 0.5
+## Version 0.5
 
-Auf diesem Zweig entsteht **0.5.0-dev** mit einem stromsparenden Empfangstreiber.
-Der SX1278 bleibt im Empfang und weckt den ESP32 bei einer erkannten Präambel aus
-dem Light-Sleep. Erste Tests mit Zeit-, Skyper- und persönlichen Nachrichten
-funktionieren. Stromaufnahme und Laufzeit sind noch nicht gemessen.
+**0.5.0** behebt abgeschnittene und beschädigte Empfangstexte. Der neue Decoder
+setzt Nachrichten über Blockgrenzen hinweg zusammen und prüft die POCSAG-
+Codewörter. Auf der Hauptseite steht außerdem der RSSI-Spitzenwert des letzten
+gültigen Empfangs. Die Änderungen stehen im [Changelog](CHANGELOG.md).
 
-Der Schlafmodus wird ausdrücklich mit `pio run -e preamble-sleep` gebaut; der
+Der optionale Schlafmodus bleibt experimentell. Dabei hört der SX1278 weiter
+und weckt den ESP32 bei einer Präambel. Er wird mit `pio run -e preamble-sleep` gebaut; der
 Standard-Build verwendet denselben Decoder mit dauerhaft wachem ESP32.
+Stromaufnahme und Laufzeit sind noch nicht gemessen.
 Den Aufbau, die Testergebnisse und offene Punkte beschreibt die
 [Treiber-Dokumentation](docs/PREAMBLE-WAKE.md).
 
@@ -31,7 +33,7 @@ Den Aufbau, die Testergebnisse und offene Punkte beschreibt die
 - Dekodierung der Skyper-Nachrichten auf RIC 4520
 - Uhrzeitsynchronisation über die DAPNET-Zeit-RICs
 - Akkuspannungsanzeige über den internen Spannungsteiler des Boards
-- im Entwicklungsstand 0.5: RSSI-Spitzenwert des letzten geprüften Empfangs in dBm
+- RSSI-Spitzenwert des letzten geprüften Empfangs in dBm
 - Bedienung mit drei Tasten und Rücksprung zum Hauptbildschirm durch langes ENTER
 - dauerhafte Speicherung mit LittleFS
 - Schutz vor zu langen Empfangsdaten, die in älteren Versionen einen Neustart
@@ -116,18 +118,19 @@ Multimeterwert abgeglichen werden.
 
 ## Stand und Grenzen
 
-Version 0.4.1 wurde auf einem LILYGO T3 V1.6.1 getestet. Geprüft wurden Start,
+Version 0.5.0 wurde auf einem LILYGO T3 V1.6.1 getestet. Geprüft wurden Start,
 Empfang, Zeitabgleich, Akkumessung, Tastenbedienung und die Zuordnung von Wetter-
 und Skyper-Nachrichten. Automatisierte Tests decken zusätzlich Parser,
 Kalenderlogik, Postfächer und die Begrenzung des Empfangspuffers ab.
 
 Die Firmware verwirft Nachrichten, die größer als der Empfangspuffer sind.
-Der Entwicklungsstand 0.5 verwendet einen eigenen fortlaufenden Decoder mit
-BCH-Fehlerkorrektur und geprüften Nachrichtengrenzen. Er wird derzeit gegen
-die Originalmeldungen des Pi-Star getestet und ist noch keine stabile Version.
+Version 0.5 verwendet einen eigenen fortlaufenden Decoder mit
+BCH-Fehlerkorrektur und geprüften Nachrichtengrenzen. Persönliche Nachrichten,
+Zeit- und Pegelmeldungen wurden mit den Pi-Star-Originalen verglichen.
+Schwache Signale und ein längerer Dauerlauf sind noch nicht umfassend geprüft.
 Die [Untersuchung des Empfangsfehlers](docs/RECEIVE-DECODER.md) beschreibt die Änderungen.
 
-Weitere Details stehen in den [Hinweisen zu Version 0.4.1](RELEASE-v0.4.1.md)
+Weitere Details stehen im [Changelog](CHANGELOG.md)
 und in der [Testanleitung](tests/README.md).
 
 ## Bibliotheken und Herkunft

@@ -1,6 +1,7 @@
-# Experimental POCSAG wake driver (0.5.0-dev)
+# Optional POCSAG wake driver (0.5.0)
 
-This branch is not a release. Default builds retain continuous CPU reception.
+The Light-sleep variant remains experimental in version 0.5.0. Default builds
+retain continuous CPU reception with the same checked streaming decoder.
 
 The SX1278 stays in synchronous continuous FSK reception at 1200 baud. DIO1 on
 GPIO33 remains the bit clock and DIO2 on GPIO34 the data input. DIO0 on GPIO26
@@ -65,7 +66,8 @@ signals require hardware testing. No guarantee of message delivery or battery
 runtime follows from a successful build or a sleep-time counter.
 
 If testing is inconclusive, leave the device in the baseline or observer build.
-Do not publish as a stable release or enable sleep in default builds yet.
+Keep sleep opt-in until the remaining hardware checks are complete; version
+0.5.0 does not enable it in the default build.
 
 ## Initial hardware results, 2026-11-03
 

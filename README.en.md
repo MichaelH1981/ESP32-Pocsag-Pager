@@ -10,17 +10,18 @@ The current firmware receives personal calls, weather and water-level data, and
 configurable warning messages. It shows the time and battery voltage and keeps
 received messages in flash storage.
 
-## Version 0.5 development
+## Version 0.5
 
-This branch contains **0.5.0-dev**, with a new receiver driver for lower power
-consumption. The SX1278 keeps listening and wakes the ESP32 from Light-sleep
-when it detects a preamble. Initial tests received time broadcasts, Skyper data
-and personal messages successfully. Current draw and battery life have not yet
-been measured.
+**0.5.0** fixes truncated and corrupted received text. The new decoder assembles
+messages across batch boundaries and checks the POCSAG codewords. The home
+screen also shows the RSSI peak of the last valid reception. See the
+[changelog](CHANGELOG.md).
 
-Build the sleep variant explicitly with `pio run -e preamble-sleep`. The default
+The optional sleep mode remains experimental. The SX1278 keeps listening and
+wakes the ESP32 on a preamble. Build it with `pio run -e preamble-sleep`. The default
 build uses the same decoder with the ESP32 continuously awake. See the
 [driver notes](docs/PREAMBLE-WAKE.md) for wiring, test results and remaining work.
+Current draw and battery life have not yet been measured.
 
 ## Features
 
@@ -37,7 +38,7 @@ build uses the same decoder with the ESP32 continuously awake. See the
 
 ## Hardware
 
-The 0.5 development branch also shows the cached RSSI peak of the last checked
+Version 0.5 also shows the cached RSSI peak of the last checked
 reception on the home screen, in dBm. It reuses read-only RSSI sampling; details
 are in the [receive investigation](docs/RECEIVE-DECODER.md#rssi-display-rx2).
 
@@ -117,17 +118,18 @@ on the display. The reading can be calibrated against a multimeter in
 
 ## Current status and limitations
 
-Version 0.4.1 was tested on a LILYGO T3 V1.6.1. Boot, reception, time sync,
+Version 0.5.0 was tested on a LILYGO T3 V1.6.1. Boot, reception, time sync,
 battery readings, button navigation, and the routing of weather and Skyper
 messages were checked on the device. Automated tests also cover the parsers,
 calendar handling, folders, and receive-buffer limit.
 
-Messages larger than the receive buffer are discarded. The 0.5 development
-branch uses a streaming decoder with BCH error correction and checked message
-boundaries. Comparison against the Pi-Star originals is in progress; this is
-not a stable release. See the [receive investigation](docs/RECEIVE-DECODER.md).
+Messages larger than the receive buffer are discarded. Version 0.5 uses a
+streaming decoder with BCH error correction and checked message boundaries.
+Personal messages, time broadcasts and water-level reports were compared with
+the Pi-Star originals. Weak-signal and longer endurance testing remain limited.
+See the [receive investigation](docs/RECEIVE-DECODER.md).
 
-See the [v0.4.1 release notes](RELEASE-v0.4.1.md) and the
+See the [changelog](CHANGELOG.md) and the
 [test instructions](tests/README.md) for more detail.
 
 ## Libraries and credits

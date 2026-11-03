@@ -60,7 +60,7 @@ static_assert(BATTERY_ADC_PIN < 0 ||
 // -----------------------------------------------------------------------------
 // Firmware version
 // -----------------------------------------------------------------------------
-const char* FW_VERSION = "v0.5.0-dev-rx3";
+const char* FW_VERSION = "v0.5.0";
 
 // -----------------------------------------------------------------------------
 // Optional battery measurement on a verified free ADC1 pin

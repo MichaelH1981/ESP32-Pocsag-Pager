@@ -1,4 +1,4 @@
-# Empfangsfehler / receive investigation (0.5 development)
+# Empfangsfehler / receive investigation (0.5.0)
 
 ## Deutsch
 
@@ -150,11 +150,29 @@ all six current rubric-61 texts exactly, as well as the complete personal test.
 The former corrupted Speyer record had been replaced by the current valid text.
 
 Across the three runs, 43 completed messages matched the Pi-Star originals.
-These are short functional comparisons, not a stable-release qualification or
-a weak-signal/endurance test. A full warning-broadcast round has not yet been
+These checks do not establish weak-signal reliability or long-term endurance.
+A full warning-broadcast round has not yet been
 observed with this decoder; its message assembly and routing are covered by
 host tests. Previously stored corrupted messages are not automatically deleted.
+
+## Release check, 0.5.0
+
+Before publication, the complete host test set passed again, including the
+independent 50,000-word BCH reference. All three build environments passed with
+the owner's configuration and again from a separate copy without private
+`config_local.h`.
+
+The final `v0.5.0` image was flashed to the T3 and checked from 22:33 to 22:37 CET.
+All 18 completed messages matched the Pi-Star originals, including all six
+Skyper rubric-61 entries from the 22:35 water-level round. The final report
+showed 463 checked words, four corrected bits, one rejected word, no discarded
+pages, no lost sync during a page, and no capture overrun. Received RSSI peaks
+were -39.5 to -40.0 dBm. The capture contained no unexpected reset or heap error.
+Version 0.5.0 keeps Light-sleep opt-in; these checks do not measure battery life.
 
 `rx1` counted a missing next-batch sync even after a complete idle-terminated
 transmission as `lost-sync`. `rx2` counts it only while a page is incomplete;
 ordinary transmission endings are not failures. The decoding rule is unchanged.
+
+The final LittleFS readback confirmed all six 22:35 rubric-61 texts exactly,
+and the existing personal test was retained. No filesystem upload was used.
